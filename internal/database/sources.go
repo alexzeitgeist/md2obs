@@ -110,32 +110,65 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 	return entries, rows.Err()
 }
 
-// SelectSourcesWithSnapshotsBetween returns distinct sources that have at
-// least one snapshot inside the inclusive date range. Used by `watch`.
-func SelectSourcesWithSnapshotsBetween(ctx context.Context, q Querier, fromDate, toDate string) ([]Source, error) {
+// WatchCandidate is one source eligible for a vault's watch session together
+// with its newest materialized snapshot inside the discovery window.
+type WatchCandidate struct {
+	Source
+	SnapshotDate string
+	ContentSHA   string
+}
+
+// SelectWatchCandidates returns sources whose newest snapshot inside the
+// inclusive date range was materialized in vaultKey. A snapshot belonging
+// only to another vault never confers watch membership.
+func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, toDate string) ([]WatchCandidate, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT DISTINCT
+		SELECT
 		    s.source_id,
 		    s.canonical_path,
-		    s.display_path
+		    s.display_path,
+		    sn.snapshot_date,
+		    r.content_sha256
 		FROM sources AS s
 		JOIN snapshots AS sn
 		    ON sn.source_id = s.source_id
-		WHERE sn.snapshot_date >= ?
+		JOIN revisions AS r
+		    ON r.revision_id = sn.revision_id
+		JOIN materializations AS m
+		    ON m.snapshot_id = sn.snapshot_id
+		JOIN vaults AS v
+		    ON v.vault_id = m.vault_id
+		WHERE v.vault_key = ?
+		  AND sn.snapshot_date >= ?
 		  AND sn.snapshot_date <= ?
-		ORDER BY s.canonical_path`, fromDate, toDate)
+		  AND sn.snapshot_date = (
+		      SELECT MAX(sn2.snapshot_date)
+		      FROM snapshots AS sn2
+		      JOIN materializations AS m2
+		          ON m2.snapshot_id = sn2.snapshot_id
+		      WHERE sn2.source_id = s.source_id
+		        AND m2.vault_id = v.vault_id
+		        AND sn2.snapshot_date >= ?
+		        AND sn2.snapshot_date <= ?)
+		ORDER BY s.canonical_path`, vaultKey, fromDate, toDate, fromDate, toDate)
 	if err != nil {
-		return nil, fmt.Errorf("select watch sources: %w", err)
+		return nil, fmt.Errorf("select watch candidates for vault %s: %w", vaultKey, err)
 	}
 	defer rows.Close()
 
-	var sources []Source
+	var candidates []WatchCandidate
 	for rows.Next() {
-		var s Source
-		if err := rows.Scan(&s.ID, &s.CanonicalPath, &s.DisplayPath); err != nil {
-			return nil, fmt.Errorf("scan watch source: %w", err)
+		var candidate WatchCandidate
+		if err := rows.Scan(
+			&candidate.ID,
+			&candidate.CanonicalPath,
+			&candidate.DisplayPath,
+			&candidate.SnapshotDate,
+			&candidate.ContentSHA,
+		); err != nil {
+			return nil, fmt.Errorf("scan watch candidate: %w", err)
 		}
-		sources = append(sources, s)
+		candidates = append(candidates, candidate)
 	}
-	return sources, rows.Err()
+	return candidates, rows.Err()
 }

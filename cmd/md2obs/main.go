@@ -34,8 +34,9 @@ Commands:
   import   Import (or refresh) the named Markdown files into today's
            dated vault folder. This is the default when the command is
            omitted. Explicit imports always overwrite.
-  watch    Watch sources with snapshots dated today (--days N widens the
-           window to N calendar days) and re-import them when they change.
+  watch    Watch sources materialized in this vault today (--days N widens
+           the initial window) and enroll later imports while running.
+           Re-import watched sources when they change.
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
            since the last import: skip (default), overwrite, or preserve.
@@ -59,7 +60,8 @@ the source content if the vault copy was edited.
 `,
 	"watch": `Usage: md2obs watch [OPTIONS]
 
-Watch recently imported sources using native filesystem notifications.
+Watch sources recently imported into the configured vault using native
+filesystem notifications. Successful imports join a running watch session.
 
 Options:
   --days N                    Inclusive calendar-day window (default 1)

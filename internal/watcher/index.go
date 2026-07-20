@@ -7,29 +7,44 @@ import (
 	"sort"
 )
 
-// Index is the exact-path filter for one watch session: only paths selected
-// from the database at startup ever match. New files appearing in watched
-// directories are ignored by construction.
+// Index is the exact-path filter for one watch session. Startup candidates and
+// later explicit imports can be enrolled; every other file appearing in an
+// armed directory is ignored by construction.
 type Index struct {
-	sources map[string]struct{}
-	parents []string
+	sources   map[string]struct{}
+	parentSet map[string]struct{}
+	parents   []string
 }
 
 // NewIndex builds the exact-path set and the deduplicated list of immediate
 // parent directories to watch.
 func NewIndex(paths []string) *Index {
-	ix := &Index{sources: make(map[string]struct{}, len(paths))}
-	parentSet := make(map[string]struct{})
+	ix := &Index{
+		sources:   make(map[string]struct{}, len(paths)),
+		parentSet: make(map[string]struct{}),
+	}
 	for _, p := range paths {
-		clean := filepath.Clean(p)
-		ix.sources[clean] = struct{}{}
-		parentSet[filepath.Dir(clean)] = struct{}{}
+		ix.Add(p)
 	}
-	for parent := range parentSet {
-		ix.parents = append(ix.parents, parent)
-	}
-	sort.Strings(ix.parents)
 	return ix
+}
+
+// Add enrolls one exact source path. It reports whether the path was new.
+// Index is intentionally not synchronized: one watcher event-loop goroutine
+// owns both additions and matches.
+func (ix *Index) Add(path string) bool {
+	clean := filepath.Clean(path)
+	if _, ok := ix.sources[clean]; ok {
+		return false
+	}
+	ix.sources[clean] = struct{}{}
+	parent := filepath.Dir(clean)
+	if _, ok := ix.parentSet[parent]; !ok {
+		ix.parentSet[parent] = struct{}{}
+		ix.parents = append(ix.parents, parent)
+		sort.Strings(ix.parents)
+	}
+	return true
 }
 
 // Match reports whether an event path is one of the selected sources,

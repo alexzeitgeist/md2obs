@@ -14,6 +14,7 @@ import (
 	"md2obs/internal/config"
 	"md2obs/internal/database"
 	"md2obs/internal/layout"
+	"md2obs/internal/watcher"
 )
 
 // syncBuffer lets the watcher goroutine and the test write/read output
@@ -636,6 +637,37 @@ func TestRunImportContinuesPastFailures(t *testing.T) {
 	}
 	if !strings.Contains(env.out.String(), "imported: ") {
 		t.Errorf("good file was not imported; output:\n%s", env.out.String())
+	}
+}
+
+func TestRunImportNotifiesWatchersAfterSuccess(t *testing.T) {
+	env := newTestEnv(t)
+	src := writeSource(t, t.TempDir(), "notify.md", "# notify\n")
+
+	if err := RunImport(context.Background(), env.deps, []string{src}); err != nil {
+		t.Fatalf("RunImport: %v", err)
+	}
+	path := watcher.NotificationPath(env.deps.DB.Path)
+	if data, err := os.ReadFile(path); err != nil || len(data) == 0 {
+		t.Fatalf("notification sidecar = %q, err %v", data, err)
+	}
+}
+
+func TestRunImportNotificationFailureIsWarning(t *testing.T) {
+	env := newTestEnv(t)
+	src := writeSource(t, t.TempDir(), "notify-warning.md", "# notify\n")
+	// The live SQL connection remains usable, but this synthetic public path
+	// cannot host the sidecar.
+	env.deps.DB.Path = filepath.Join(t.TempDir(), "missing", "state.db")
+
+	if err := RunImport(context.Background(), env.deps, []string{src}); err != nil {
+		t.Fatalf("notification failure changed import result: %v", err)
+	}
+	if !strings.Contains(env.out.String(), "warning: import succeeded, but running watchers may need to be restarted") {
+		t.Fatalf("missing notification warning; output:\n%s", env.out.String())
+	}
+	if !strings.Contains(env.out.String(), "imported: ") {
+		t.Fatalf("successful import result missing; output:\n%s", env.out.String())
 	}
 }
 

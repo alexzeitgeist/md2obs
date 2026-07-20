@@ -17,6 +17,7 @@ import (
 	"md2obs/internal/layout"
 	"md2obs/internal/materialize"
 	"md2obs/internal/source"
+	"md2obs/internal/watcher"
 )
 
 // Policy decides what happens when the vault copy about to be overwritten
@@ -74,6 +75,9 @@ func RunImport(ctx context.Context, d *Deps, files []string) error {
 			continue
 		}
 		printResult(d.Out, res)
+		if err := watcher.NotifyImport(d.DB.Path); err != nil {
+			fmt.Fprintf(d.Err, "warning: import succeeded, but running watchers may need to be restarted: %v\n", err)
+		}
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d imports failed", failed, len(files))

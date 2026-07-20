@@ -1,6 +1,11 @@
 package watcher
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync/atomic"
@@ -37,6 +42,32 @@ func TestIndexExactPathFiltering(t *testing.T) {
 	// Same basename in a nested (unwatched) directory never matches.
 	if _, ok := ix.Match("/home/alex/project-a/docs/README.md"); ok {
 		t.Error("nested file matched")
+	}
+}
+
+func TestIndexDynamicAdditionIsIdempotent(t *testing.T) {
+	ix := NewIndex(nil)
+	if !ix.Add("/home/alex/project-a/one.md") {
+		t.Fatal("first addition was not reported as new")
+	}
+	if ix.Add("/home/alex/project-a/./one.md") {
+		t.Fatal("cleaned duplicate was reported as new")
+	}
+	if !ix.Add("/home/alex/project-a/two.md") {
+		t.Fatal("second source in existing parent was not added")
+	}
+	if !ix.Add("/home/alex/project-b/three.md") {
+		t.Fatal("source in new parent was not added")
+	}
+	if ix.Len() != 3 {
+		t.Fatalf("Len = %d, want 3", ix.Len())
+	}
+	wantParents := []string{"/home/alex/project-a", "/home/alex/project-b"}
+	if !reflect.DeepEqual(ix.Parents(), wantParents) {
+		t.Errorf("Parents = %v, want %v", ix.Parents(), wantParents)
+	}
+	if _, ok := ix.Match("/home/alex/project-a/unrelated.md"); ok {
+		t.Error("dynamic parent caused unrelated path to match")
 	}
 }
 
@@ -128,4 +159,250 @@ func TestDebouncerIgnoresStaleGeneration(t *testing.T) {
 		t.Fatalf("stale generation fired for %q", got)
 	default:
 	}
+}
+
+func TestRunDynamicallyEnrollsNewSource(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	initialDir := t.TempDir()
+	dynamicDir := t.TempDir()
+	initial := filepath.Join(initialDir, "initial.md")
+	dynamic := filepath.Join(dynamicDir, "dynamic.md")
+	if err := os.WriteFile(initial, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dynamic, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var includeDynamic atomic.Bool
+	ready := make(chan Stats, 1)
+	activated := make(chan string, 1)
+	handled := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load: func() ([]string, error) {
+				if includeDynamic.Load() {
+					return []string{initial, dynamic}, nil
+				}
+				return []string{initial}, nil
+			},
+			Activate: func(path string) { activated <- path },
+			Handle:   func(path string) { handled <- path },
+			Ready:    func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	defer cancel()
+
+	select {
+	case stats := <-ready:
+		if stats.Sources != 1 || stats.Directories != 1 {
+			t.Fatalf("startup stats = %+v", stats)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+	includeDynamic.Store(true)
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-activated:
+		if path != dynamic {
+			t.Fatalf("activated %q, want %q", path, dynamic)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dynamic source was not activated")
+	}
+	if err := os.WriteFile(dynamic, []byte("three"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-handled:
+		if path != dynamic {
+			t.Fatalf("handled %q, want %q", path, dynamic)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dynamic source change was not handled")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestRunRetriesMembershipRefresh(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	sourceDir := t.TempDir()
+	dynamic := filepath.Join(sourceDir, "dynamic.md")
+	if err := os.WriteFile(dynamic, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	ready := make(chan Stats, 1)
+	activated := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load: func() ([]string, error) {
+				call := calls.Add(1)
+				if call == 1 {
+					return nil, nil
+				}
+				if call < 4 {
+					return nil, errors.New("transient load failure")
+				}
+				return []string{dynamic}, nil
+			},
+			Activate: func(path string) { activated <- path },
+			Handle:   func(string) {},
+			Ready:    func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	defer cancel()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-activated:
+		if path != dynamic {
+			t.Fatalf("activated %q, want %q", path, dynamic)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh did not succeed after retries")
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("load calls = %d, want 4", calls.Load())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestRunStopsAfterThreeRefreshFailures(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	var calls atomic.Int32
+	persistentErr := errors.New("persistent load failure")
+	ready := make(chan Stats, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(context.Background(), Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load: func() ([]string, error) {
+				if calls.Add(1) == 1 {
+					return nil, nil
+				}
+				return nil, persistentErr
+			},
+			Handle: func(string) {},
+			Ready:  func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, persistentErr) || calls.Load() != 4 {
+			t.Fatalf("Run error = %v, load calls = %d", err, calls.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop after persistent refresh failures")
+	}
+}
+
+func TestRunFailsWhenNotificationDirectoryCannotBeWatched(t *testing.T) {
+	root := t.TempDir()
+	err := Run(context.Background(), Options{
+		NotificationPath: filepath.Join(root, "missing", "state.db.watch-notify"),
+		SourceDebounce:   10 * time.Millisecond,
+		RefreshDebounce:  10 * time.Millisecond,
+		Load:             func() ([]string, error) { return nil, nil },
+		Handle:           func(string) {},
+	}, discardLogger())
+	if err == nil {
+		t.Fatal("missing notification directory was accepted")
+	}
+}
+
+func TestRunRetriesSourceWhoseParentBecomesAvailable(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	missingParent := filepath.Join(t.TempDir(), "later")
+	sourcePath := filepath.Join(missingParent, "later.md")
+	ready := make(chan Stats, 1)
+	activated := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load:             func() ([]string, error) { return []string{sourcePath}, nil },
+			Activate:         func(path string) { activated <- path },
+			Handle:           func(string) {},
+			Ready:            func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	defer cancel()
+	select {
+	case stats := <-ready:
+		if stats.Sources != 0 || stats.Directories != 0 {
+			t.Fatalf("unwatchable startup source was counted: %+v", stats)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+	if err := os.Mkdir(missingParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("available"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-activated:
+		if path != sourcePath {
+			t.Fatalf("activated %q, want %q", path, sourcePath)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("source was not retried after its parent became available")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

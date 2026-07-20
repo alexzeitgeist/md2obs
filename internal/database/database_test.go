@@ -214,29 +214,53 @@ func TestEnsureVaultAndLayoutStable(t *testing.T) {
 	}
 }
 
-func TestSelectSourcesWithSnapshotsBetween(t *testing.T) {
+func TestSelectWatchCandidatesAreVaultScoped(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	q := db.Query()
 
-	old, _ := UpsertSource(ctx, q, "/a/old.md", "/a/old.md", "t")
-	recent, _ := UpsertSource(ctx, q, "/a/recent.md", "/a/recent.md", "t")
-	rOld, _ := FindOrCreateRevision(ctx, q, old, "aaa", 1, 1, "t")
-	rNew, _ := FindOrCreateRevision(ctx, q, recent, "bbb", 1, 1, "t")
-	CreateSnapshot(ctx, q, old, rOld, "2026-07-10", "t")
-	CreateSnapshot(ctx, q, recent, rNew, "2026-07-19", "t")
-	CreateSnapshot(ctx, q, recent, rNew, "2026-07-20", "t")
+	vaultA, _ := EnsureVault(ctx, q, "/vault-a", "a", "/vault-a", "t")
+	vaultB, _ := EnsureVault(ctx, q, "/vault-b", "b", "/vault-b", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
 
-	got, err := SelectSourcesWithSnapshotsBetween(ctx, q, "2026-07-19", "2026-07-20")
+	recent, _ := UpsertSource(ctx, q, "/src/recent.md", "/src/recent.md", "t")
+	r19, _ := FindOrCreateRevision(ctx, q, recent, "sha-19", 1, 1, "t")
+	r20, _ := FindOrCreateRevision(ctx, q, recent, "sha-20", 1, 2, "t")
+	s19, _ := CreateSnapshot(ctx, q, recent, r19, "2026-07-19", "t")
+	s20, _ := CreateSnapshot(ctx, q, recent, r20, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "t")
+	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "t")
+
+	foreign, _ := UpsertSource(ctx, q, "/src/foreign.md", "/src/foreign.md", "t")
+	rForeign, _ := FindOrCreateRevision(ctx, q, foreign, "sha-b", 1, 1, "t")
+	sForeign, _ := CreateSnapshot(ctx, q, foreign, rForeign, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/b.md", rForeign, "t")
+
+	global, _ := UpsertSource(ctx, q, "/src/global.md", "/src/global.md", "t")
+	rGlobal, _ := FindOrCreateRevision(ctx, q, global, "sha-global", 1, 1, "t")
+	CreateSnapshot(ctx, q, global, rGlobal, "2026-07-20", "t")
+
+	got, err := SelectWatchCandidates(ctx, q, "/vault-a", "2026-07-19", "2026-07-20")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].CanonicalPath != "/a/recent.md" {
-		t.Errorf("selected = %+v", got)
+	if len(got) != 1 {
+		t.Fatalf("selected = %+v, want one vault-a candidate", got)
+	}
+	if got[0].CanonicalPath != "/src/recent.md" || got[0].SnapshotDate != "2026-07-20" || got[0].ContentSHA != "sha-20" {
+		t.Errorf("candidate = %+v", got[0])
 	}
 
-	got, err = SelectSourcesWithSnapshotsBetween(ctx, q, "2026-07-01", "2026-07-20")
-	if err != nil || len(got) != 2 {
-		t.Errorf("wide range selected %d sources, err %v", len(got), err)
+	got, err = SelectWatchCandidates(ctx, q, "/vault-b", "2026-07-19", "2026-07-20")
+	if err != nil || len(got) != 1 || got[0].CanonicalPath != "/src/foreign.md" {
+		t.Errorf("vault-b candidates = %+v, err %v", got, err)
+	}
+
+	got, err = SelectWatchCandidates(ctx, q, "/never-registered", "2026-07-19", "2026-07-20")
+	if err != nil || len(got) != 0 {
+		t.Errorf("missing-vault candidates = %+v, err %v", got, err)
+	}
+	if id, err := GetVaultIDByKey(ctx, q, "/never-registered"); err != nil || id != 0 {
+		t.Errorf("watch candidate query registered vault: id %d, err %v", id, err)
 	}
 }

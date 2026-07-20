@@ -6,40 +6,148 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// Run blocks on native filesystem notifications for the index's parent
-// directories until ctx is cancelled. Events on exactly-selected paths are
-// debounced per source and then passed to handle, serialized on this
-// goroutine. There is no periodic ticker: an idle watcher consumes no
-// user-space CPU.
-func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(path string), logger *slog.Logger) error {
+// DefaultRefreshDebounce coalesces bursts of explicit-import notifications.
+// It is independent of the source quiet period exposed by --debounce.
+const DefaultRefreshDebounce = 50 * time.Millisecond
+
+// Stats describes the exact sources and source directories armed at startup.
+type Stats struct {
+	Sources     int
+	Directories int
+}
+
+// Options configures one dynamically growing watch session. All callbacks,
+// index mutations, and watched imports run serially on the event-loop
+// goroutine. Timer goroutines only deliver paths on channels.
+type Options struct {
+	NotificationPath string
+	SourceDebounce   time.Duration
+	RefreshDebounce  time.Duration
+	Load             func() ([]string, error)
+	Activate         func(path string)
+	Handle           func(path string)
+	Ready            func(Stats)
+}
+
+// Run watches exact source paths loaded from SQLite and refreshes membership
+// when an explicit import updates NotificationPath. Membership is add-only;
+// unrelated paths in armed directories never reach the callbacks.
+func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if opts.NotificationPath == "" {
+		return errors.New("watch notification path is empty")
+	}
+	if opts.SourceDebounce <= 0 {
+		return fmt.Errorf("source debounce must be positive, got %s", opts.SourceDebounce)
+	}
+	if opts.RefreshDebounce <= 0 {
+		opts.RefreshDebounce = DefaultRefreshDebounce
+	}
+	if opts.Load == nil || opts.Handle == nil {
+		return errors.New("watch load and handle callbacks are required")
+	}
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("create filesystem watcher: %w", err)
 	}
 	defer w.Close()
 
-	watched := 0
-	for _, parent := range ix.Parents() {
-		if err := w.Add(parent); err != nil {
-			logger.Warn("cannot watch directory", "parent", parent, "err", err)
-			continue
-		}
-		watched++
-	}
-	if watched == 0 {
-		return errors.New("no directories could be watched")
+	notificationPath := filepath.Clean(opts.NotificationPath)
+	notificationParent := filepath.Dir(notificationPath)
+	if err := w.Add(notificationParent); err != nil {
+		return fmt.Errorf("watch notification directory %s: %w", notificationParent, err)
 	}
 
-	deb := NewDebouncer(debounce)
-	defer deb.Stop()
+	ix := NewIndex(nil)
+	watchedDirs := map[string]struct{}{notificationParent: {}}
+
+	enroll := func(paths []string, activate bool) {
+		for _, path := range paths {
+			clean := filepath.Clean(path)
+			if _, exists := ix.Match(clean); exists {
+				continue
+			}
+			parent := filepath.Dir(clean)
+			if _, armed := watchedDirs[parent]; !armed {
+				if err := w.Add(parent); err != nil {
+					logger.Warn("cannot watch source directory", "source", clean, "parent", parent, "err", err)
+					continue
+				}
+				watchedDirs[parent] = struct{}{}
+			}
+			if !ix.Add(clean) {
+				continue
+			}
+			if activate && opts.Activate != nil {
+				opts.Activate(clean)
+			}
+		}
+	}
+
+	initial, err := opts.Load()
+	if err != nil {
+		return err
+	}
+	enroll(initial, false)
+	if opts.Ready != nil {
+		opts.Ready(Stats{Sources: ix.Len(), Directories: len(ix.Parents())})
+	}
+
+	sourceDebouncer := NewDebouncer(opts.SourceDebounce)
+	defer sourceDebouncer.Stop()
+	refreshDebouncer := NewDebouncer(opts.RefreshDebounce)
+	defer refreshDebouncer.Stop()
+
+	var retryTimer *time.Timer
+	var retryC <-chan time.Time
+	refreshAttempt := 0
+	stopRetry := func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+		retryTimer = nil
+		retryC = nil
+		refreshAttempt = 0
+	}
+	defer stopRetry()
+
+	refresh := func() error {
+		paths, loadErr := opts.Load()
+		if loadErr == nil {
+			enroll(paths, true)
+			stopRetry()
+			return nil
+		}
+
+		refreshAttempt++
+		var delay time.Duration
+		switch refreshAttempt {
+		case 1:
+			delay = 100 * time.Millisecond
+		case 2:
+			delay = 500 * time.Millisecond
+		default:
+			stopRetry()
+			return fmt.Errorf("refresh watch membership after 3 attempts: %w", loadErr)
+		}
+		logger.Warn("cannot refresh watch membership; retrying", "attempt", refreshAttempt, "retry_in", delay, "err", loadErr)
+		if retryTimer == nil {
+			retryTimer = time.NewTimer(delay)
+		} else {
+			retryTimer.Reset(delay)
+		}
+		retryC = retryTimer.C
+		return nil
+	}
 
 	for {
 		select {
@@ -47,13 +155,14 @@ func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(pat
 			if !ok {
 				return nil
 			}
-			// Create covers atomic saves (temp file renamed onto the
-			// source); Write covers in-place saves; Rename marks the path
-			// changing identity — the post-debounce existence check decides
-			// what to do.
+			clean := filepath.Clean(ev.Name)
+			if clean == notificationPath && ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
+				refreshDebouncer.Trigger(notificationPath)
+				continue
+			}
 			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
-				if p, ok := ix.Match(ev.Name); ok {
-					deb.Trigger(p)
+				if path, matched := ix.Match(clean); matched {
+					sourceDebouncer.Trigger(path)
 				}
 			}
 		case err, ok := <-w.Errors:
@@ -61,12 +170,23 @@ func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(pat
 				return nil
 			}
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				logger.Warn("notification queue overflowed; changes may have been missed", "action", "re-run md2obs import on files you changed")
+				logger.Warn("notification queue overflowed; source changes or enrollments may have been missed", "action", "re-run md2obs import on affected files")
 			} else {
 				logger.Error("filesystem watcher error", "err", err)
 			}
-		case p := <-deb.C:
-			handle(p)
+		case path := <-sourceDebouncer.C:
+			opts.Handle(path)
+		case <-refreshDebouncer.C:
+			if retryC == nil {
+				if err := refresh(); err != nil {
+					return err
+				}
+			}
+		case <-retryC:
+			retryC = nil
+			if err := refresh(); err != nil {
+				return err
+			}
 		case <-ctx.Done():
 			return nil
 		}

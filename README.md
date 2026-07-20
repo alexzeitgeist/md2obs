@@ -84,20 +84,37 @@ names are truncated on a UTF-8 boundary and retain the source hash.
 ### watch
 
 ```console
-md2obs watch                       # sources with snapshots dated today
+md2obs watch                       # sources imported into this vault today
 md2obs watch --days 3              # today and the previous two days
 md2obs watch --debounce 500ms      # per-source quiet period (default)
 md2obs watch --on-vault-change=preserve
 ```
 
-The watcher selects sources from the database, watches only their immediate
-parent directories (non-recursively, via native filesystem notifications),
-and re-imports a source after its events settle. It never scans directories,
-never imports unrelated files, never rewrites anything at startup, and does
-no polling — idle, it consumes effectively no CPU. Stop it with Ctrl-C.
-The source identity selected from SQLite is pinned for the watch session. If
-the path is replaced by a symlink to another file, the event is rejected and
-reported rather than registering or importing the new target.
+The watcher selects recent sources materialized in the configured vault,
+watches only their immediate parent directories (non-recursively, via native
+filesystem notifications), and re-imports a source after its events settle.
+Membership is vault-scoped: imports made only into another vault sharing the
+same state database are not watched or materialized here.
+
+Successful explicit imports into this vault automatically join an already
+running watcher, including imports from directories it was not previously
+watching. A watcher started with no eligible sources stays running and waits
+for imports. Membership grows until restart; it is not reduced as the date
+window advances. The discovery range expands across midnight so an import
+immediately before midnight is not missed when its notification arrives just
+after midnight.
+
+Startup is passive and never rewrites existing vault copies. A source enrolled
+after startup gets one silent content check after its directory watch is armed,
+closing the small import-to-watch race; matching content causes no vault write
+and does not evaluate `--on-vault-change`. The watcher never scans directories,
+never imports unrelated files, and does no polling — idle, it consumes
+effectively no CPU. Stop it with Ctrl-C.
+
+Each source identity is pinned when it is enrolled. If its path is replaced by
+a symlink to another file, the event is rejected and reported rather than
+registering or importing the new target. Multiple watchers for the same vault
+operate independently and may perform the same idempotent refresh.
 
 `--on-vault-change` decides what happens when the vault copy was edited
 (for example on a phone, synced back) since md2obs last wrote it:
@@ -183,14 +200,17 @@ For anything you want to keep, duplicate the note into a normal folder
 - **`no vault configured`** — write the config file or set `MD2OBS_VAULT`.
 - **`vault … does not exist`** — `vault_path` must point at an existing
   directory (the vault root, not a subfolder).
-- **Watcher logs `parent directory unavailable`** — the source's directory is
-  gone or inaccessible; the source is skipped for this session. Re-import
-  after it returns.
+- **Watcher logs `cannot watch source directory`** — the source's directory is
+  gone or inaccessible. Restore it and re-import the source to retry dynamic
+  enrollment, or restart the watcher.
 - **Watcher logs `source identity changed`** — the registered path now resolves
   through a symlink to a different file. Restore the original path or import
   the new target explicitly.
-- **`notification queue overflowed`** — events may have been lost; re-run
-  `md2obs import` on the files you changed.
+- **`notification queue overflowed`** — source changes or new enrollments may
+  have been lost; re-run `md2obs import` on the affected files.
+- **Import warns that running watchers may need to be restarted** — the import
+  itself committed, but its cross-process watcher notification failed. Restart
+  `md2obs watch`, or fix the reported state-directory error and re-import.
 - **A file was imported under a `--project--…` name you didn't expect** —
   another source with the same basename already owns the plain name for that
   date; see `md2obs list`.

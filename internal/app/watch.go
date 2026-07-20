@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"md2obs/internal/database"
+	"md2obs/internal/source"
 	"md2obs/internal/watcher"
 )
 
@@ -43,44 +43,47 @@ func (o WatchOptions) Validate() error {
 	return nil
 }
 
-// RunWatch watches the immediate parent directories of sources that have
-// snapshots inside the date window, re-importing a source after its events
-// settle. It never scans for files, registers new sources, or rewrites
-// anything at startup.
+// RunWatch watches the immediate parent directories of sources materialized
+// in the configured vault inside the date window. Successful explicit imports
+// dynamically add sources, while startup remains passive.
 func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 	if err := opts.Validate(); err != nil {
 		return err
 	}
 
-	fromDate, toDate := dateRange(d.Now(), opts.Days)
-	sources, err := database.SelectSourcesWithSnapshotsBetween(ctx, d.DB.Query(), fromDate, toDate)
-	if err != nil {
-		return err
-	}
-	if len(sources) == 0 {
-		fmt.Fprintf(d.Out, "No imported sources found for %s\n", describeRange(fromDate, toDate))
-		return nil
-	}
-
-	selected := make(map[string]database.Source, len(sources))
-	var paths []string
-	for _, s := range sources {
-		parent := filepath.Dir(s.CanonicalPath)
-		if fi, err := os.Stat(parent); err != nil || !fi.IsDir() {
-			d.logger().Warn("parent directory unavailable; source skipped", "source", s.CanonicalPath, "parent", parent, "err", err)
-			continue
+	discoveryFrom, discoveryTo := dateRange(d.Now(), opts.Days)
+	selected := make(map[string]database.WatchCandidate)
+	load := func() ([]string, error) {
+		currentFrom, currentTo := dateRange(d.Now(), opts.Days)
+		if currentFrom < discoveryFrom {
+			discoveryFrom = currentFrom
 		}
-		paths = append(paths, s.CanonicalPath)
-		selected[s.CanonicalPath] = s
+		if currentTo > discoveryTo {
+			discoveryTo = currentTo
+		}
+		candidates, err := database.SelectWatchCandidates(
+			ctx,
+			d.DB.Query(),
+			d.Config.VaultAbs,
+			discoveryFrom,
+			discoveryTo,
+		)
+		if err != nil {
+			return nil, err
+		}
+		paths := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			path := candidate.CanonicalPath
+			if pinned, ok := selected[path]; ok {
+				// Refresh activation facts without changing the source identity
+				// pinned when this path was first discovered.
+				candidate.Source = pinned.Source
+			}
+			selected[path] = candidate
+			paths = append(paths, path)
+		}
+		return paths, nil
 	}
-	if len(paths) == 0 {
-		fmt.Fprintf(d.Out, "No watchable sources for %s (all parent directories missing)\n", describeRange(fromDate, toDate))
-		return nil
-	}
-
-	ix := watcher.NewIndex(paths)
-	fmt.Fprintf(d.Out, "Watching %d imported sources from %d directories\n", ix.Len(), len(ix.Parents()))
-	fmt.Fprintf(d.Out, "Date range: %s through %s\n", fromDate, toDate)
 
 	handle := func(p string) {
 		// A fired debounce for a missing file means the source was removed;
@@ -91,19 +94,63 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			}
 			return
 		}
-		registered, ok := selected[p]
+		candidate, ok := selected[p]
 		if !ok {
 			d.logger().Error("watch event has no registered source", "source", p)
 			return
 		}
-		res, err := ImportWatchedSource(ctx, d, registered, opts.OnVaultChange)
+		res, err := ImportWatchedSource(ctx, d, candidate.Source, opts.OnVaultChange)
 		if err != nil {
 			d.logger().Error("watch import failed", "source", p, "err", err)
 			return
 		}
 		printResult(d.Out, res)
 	}
-	return watcher.Run(ctx, ix, opts.Debounce, handle, d.logger())
+
+	activate := func(p string) {
+		candidate, ok := selected[p]
+		if !ok {
+			d.logger().Error("watch activation has no registered source", "source", p)
+			return
+		}
+		canonical, _, err := source.Canonicalize(p)
+		if err != nil {
+			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
+			return
+		}
+		if canonical != candidate.CanonicalPath {
+			err := fmt.Errorf("watch source identity changed: registered %s now resolves to %s", candidate.CanonicalPath, canonical)
+			d.logger().Error("watch activation import failed", "source", p, "err", err)
+			return
+		}
+		_, sha, err := source.ReadAndHash(canonical)
+		if err != nil {
+			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
+			return
+		}
+		if sha == candidate.ContentSHA {
+			return
+		}
+		res, err := ImportWatchedSource(ctx, d, candidate.Source, opts.OnVaultChange)
+		if err != nil {
+			d.logger().Error("watch activation import failed", "source", p, "err", err)
+			return
+		}
+		printResult(d.Out, res)
+	}
+
+	return watcher.Run(ctx, watcher.Options{
+		NotificationPath: watcher.NotificationPath(d.DB.Path),
+		SourceDebounce:   opts.Debounce,
+		RefreshDebounce:  watcher.DefaultRefreshDebounce,
+		Load:             load,
+		Activate:         activate,
+		Handle:           handle,
+		Ready: func(stats watcher.Stats) {
+			fmt.Fprintf(d.Out, "Watching %d imported sources from %d directories\n", stats.Sources, stats.Directories)
+			fmt.Fprintf(d.Out, "Date range: %s through %s\n", discoveryFrom, discoveryTo)
+		},
+	}, d.logger())
 }
 
 // dateRange returns the inclusive local calendar-day window ending today:
@@ -112,11 +159,4 @@ func dateRange(now time.Time, days int) (fromDate, toDate string) {
 	toDate = now.Format(dateFormat)
 	fromDate = now.AddDate(0, 0, -(days - 1)).Format(dateFormat)
 	return fromDate, toDate
-}
-
-func describeRange(fromDate, toDate string) string {
-	if fromDate == toDate {
-		return fromDate
-	}
-	return fromDate + " through " + toDate
 }

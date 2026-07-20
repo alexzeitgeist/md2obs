@@ -7,6 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"md2obs/internal/config"
+	"md2obs/internal/database"
+	"md2obs/internal/layout"
+	"md2obs/internal/watcher"
 )
 
 func TestDateRange(t *testing.T) {
@@ -34,14 +39,23 @@ func TestDateRange(t *testing.T) {
 
 func TestWatchNoSources(t *testing.T) {
 	env := newTestEnv(t)
-	err := RunWatch(context.Background(), env.deps, WatchOptions{
-		Days: 1, Debounce: DefaultDebounce, OnVaultChange: PolicySkip,
-	})
-	if err != nil {
-		t.Fatalf("RunWatch: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: DefaultDebounce, OnVaultChange: PolicySkip,
+		})
+	}()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources from 0 directories")
+	}) {
+		cancel()
+		<-done
+		t.Fatalf("empty watcher did not stay running; output:\n%s", env.out.String())
 	}
-	if !strings.Contains(env.out.String(), "No imported sources found for 2026-07-20") {
-		t.Errorf("output:\n%s", env.out.String())
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
 	}
 }
 
@@ -190,6 +204,361 @@ func TestWatchDaysIncludesOlderSnapshot(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestWatchEnrollsImportAfterEmptyStartup(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("empty watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	src := writeSource(t, t.TempDir(), "dynamic.md", "# v1\n")
+	res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+
+	// This edit may race enrollment. Activation reconciliation or the newly
+	// armed directory watch must still bring the vault to v2.
+	if err := os.WriteFile(src, []byte("# v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(res.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(vaultAbs)
+		return err == nil && string(data) == "# v2\n"
+	}) {
+		t.Fatalf("dynamically enrolled source was not reconciled; output:\n%s", env.out.String())
+	}
+
+	if err := os.WriteFile(src, []byte("# v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(vaultAbs)
+		return err == nil && string(data) == "# v3\n"
+	}) {
+		t.Fatalf("later change to dynamic source was not watched; output:\n%s", env.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchDynamicEnrollmentIsVaultScoped(t *testing.T) {
+	envA := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, envA.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(envA.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("vault-a watcher did not start; output:\n%s", envA.out.String())
+	}
+
+	cfgB := &config.Config{
+		VaultPath:     t.TempDir(),
+		Layout:        config.DefaultLayout,
+		RootDirectory: config.DefaultRootDirectory,
+		StateDBPath:   envA.deps.Config.StateDBPath,
+	}
+	if err := cfgB.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	importerB := openWatchTestDeps(t, cfgB, envA.deps.Now)
+	src := writeSource(t, t.TempDir(), "scoped.md", "# b1\n")
+	if _, err := ImportFile(ctx, importerB, src, PolicyOverwrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importerB.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := os.WriteFile(src, []byte("# b2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if files := vaultMarkdownFiles(t, envA.vault); len(files) != 0 {
+		t.Fatalf("vault-b import leaked into vault-a watcher: %v", files)
+	}
+
+	importerA := openWatchTestDeps(t, envA.deps.Config, envA.deps.Now)
+	resA, err := ImportFile(ctx, importerA, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importerA.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := os.WriteFile(src, []byte("# a3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vaultAPath := filepath.Join(envA.vault, filepath.FromSlash(resA.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(vaultAPath)
+		return err == nil && string(data) == "# a3\n"
+	}) {
+		t.Fatalf("same-vault import was not enrolled; output:\n%s", envA.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchEnrollmentSurvivesMidnightNotification(t *testing.T) {
+	env := newTestEnv(t)
+	env.setNow(time.Date(2026, 7, 20, 23, 59, 59, 0, time.Local))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	src := writeSource(t, t.TempDir(), "midnight.md", "# day-one\n")
+	if _, err := ImportFile(ctx, importer, src, PolicyOverwrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	// Move the watcher's discovery clock past midnight before its 50 ms
+	// notification debounce expires.
+	env.setNow(time.Date(2026, 7, 21, 0, 0, 0, 0, time.Local))
+	time.Sleep(250 * time.Millisecond)
+	if err := os.WriteFile(src, []byte("# day-two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitUntil(5*time.Second, func() bool {
+		return vaultContainsContent(t, env.vault, "# day-two\n")
+	}) {
+		t.Fatalf("pre-midnight import was not enrolled after midnight; output:\n%s", env.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchUnchangedActivationLeavesVaultEditAlone(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicyOverwrite,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	src := writeSource(t, t.TempDir(), "vault-edit.md", "# source\n")
+	res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(res.RelPath))
+	if err := os.WriteFile(vaultAbs, []byte("# phone edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	data, err := os.ReadFile(vaultAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "# phone edit\n" {
+		t.Fatalf("unchanged activation evaluated overwrite policy: %q", data)
+	}
+	if strings.Contains(env.out.String(), "unchanged:") {
+		t.Fatalf("unchanged activation produced import output:\n%s", env.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	dir := t.TempDir()
+	src := writeSource(t, dir, "identity.md", "# original\n")
+	res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := writeSource(t, t.TempDir(), "other.md", "# replacement\n")
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, src); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "watch source identity changed")
+	}) {
+		t.Fatalf("dynamic identity change was not reported; output:\n%s", env.out.String())
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(res.RelPath))
+	data, err := os.ReadFile(vaultAbs)
+	if err != nil || string(data) != "# original\n" {
+		t.Fatalf("replacement identity was imported: %q, err %v", data, err)
+	}
+
+	// Restoring the original canonical path must allow the retained enrollment
+	// to process a later event.
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("# restored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(vaultAbs)
+		return err == nil && string(data) == "# restored\n"
+	}) {
+		t.Fatalf("restored dynamic identity was no longer watched; output:\n%s", env.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchCountsDatabaseDirectoryWhenItIsASourceParent(t *testing.T) {
+	env := newTestEnv(t)
+	src := writeSource(t, filepath.Dir(env.deps.DB.Path), "beside-db.md", "# source\n")
+	if _, err := ImportFile(context.Background(), env.deps, src, PolicyOverwrite); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 1 imported sources from 1 directories")
+	}) {
+		cancel()
+		<-done
+		t.Fatalf("source directory count was wrong; output:\n%s", env.out.String())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func openWatchTestDeps(t *testing.T, cfg *config.Config, now func() time.Time) *Deps {
+	t.Helper()
+	db, err := database.Open(context.Background(), cfg.StateDBPath)
+	if err != nil {
+		t.Fatalf("open second database connection: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return &Deps{
+		DB:     db,
+		Config: cfg,
+		Layout: layout.NewDatedFlatV1(),
+		Now:    now,
+		Out:    &syncBuffer{},
+		Err:    &syncBuffer{},
+	}
+}
+
+func vaultMarkdownFiles(t *testing.T, vault string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(vault, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func vaultContainsContent(t *testing.T, vault, want string) bool {
+	t.Helper()
+	for _, path := range vaultMarkdownFiles(t, vault) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func waitUntil(timeout time.Duration, condition func() bool) bool {
