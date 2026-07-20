@@ -4,8 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -44,6 +47,35 @@ Configuration:
   MD2OBS_STATE_DB  overrides the state database location
 `
 
+var commandUsage = map[string]string{
+	"import": `Usage: md2obs import FILE...
+
+Import or refresh explicitly named Markdown files. An explicit import restores
+the source content if the vault copy was edited.
+`,
+	"watch": `Usage: md2obs watch [OPTIONS]
+
+Watch recently imported sources using native filesystem notifications.
+
+Options:
+  --days N                    Inclusive calendar-day window (default 1)
+  --debounce DURATION         Per-source quiet period (default 500ms)
+  --on-vault-change POLICY    skip (default), overwrite, or preserve
+`,
+	"list": `Usage: md2obs list
+
+List known sources and their most recent snapshots.
+`,
+	"history": `Usage: md2obs history FILE
+
+Show dated snapshots for one explicitly imported source.
+`,
+	"status": `Usage: md2obs status
+
+Show configuration, database location, schema version, and counts.
+`,
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -61,6 +93,15 @@ func run(args []string) int {
 	case "import", "watch", "list", "history", "status":
 	default:
 		fmt.Fprintf(os.Stderr, "md2obs: unknown command %q\n\n%s", command, usage)
+		return 2
+	}
+	options, err := parseCommand(command, args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stdout, commandUsage[command])
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 2
 	}
 
@@ -87,71 +128,116 @@ func run(args []string) int {
 		Now:    time.Now,
 		Out:    os.Stdout,
 		Err:    os.Stderr,
+		Log:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 
-	if err := dispatch(ctx, deps, command, args[1:]); err != nil {
+	if err := dispatch(ctx, deps, command, options); err != nil {
 		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func dispatch(ctx context.Context, deps *app.Deps, command string, args []string) error {
+type commandOptions struct {
+	files       []string
+	historyFile string
+	watch       app.WatchOptions
+}
+
+func commandFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+// parseCommand validates all command syntax before configuration or SQLite is
+// touched, so usage errors do not get masked by environmental failures.
+func parseCommand(command string, args []string) (commandOptions, error) {
+	var options commandOptions
 	switch command {
 	case "import":
-		fs := flag.NewFlagSet("import", flag.ContinueOnError)
+		fs := commandFlagSet("import")
 		if err := fs.Parse(args); err != nil {
-			return err
+			return options, err
 		}
 		if fs.NArg() == 0 {
-			return fmt.Errorf("usage: md2obs import FILE...")
+			return options, fmt.Errorf("usage: md2obs import FILE...")
 		}
-		return app.RunImport(ctx, deps, fs.Args())
+		options.files = fs.Args()
+		return options, nil
 
 	case "watch":
-		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+		fs := commandFlagSet("watch")
 		days := fs.Int("days", 1, "inclusive calendar-day window (1 = today)")
 		debounce := fs.Duration("debounce", app.DefaultDebounce, "per-source quiet period before re-import")
 		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
 		if err := fs.Parse(args); err != nil {
-			return err
+			return options, err
 		}
 		if fs.NArg() != 0 {
-			return fmt.Errorf("usage: md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]")
+			return options, fmt.Errorf("usage: md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]")
 		}
 		policy, err := app.ParsePolicy(*policyFlag)
 		if err != nil {
-			return err
+			return options, err
 		}
-		return app.RunWatch(ctx, deps, app.WatchOptions{
+		options.watch = app.WatchOptions{
 			Days:          *days,
 			Debounce:      *debounce,
 			OnVaultChange: policy,
-		})
+		}
+		if err := options.watch.Validate(); err != nil {
+			return options, err
+		}
+		return options, nil
 
 	case "list":
-		fs := flag.NewFlagSet("list", flag.ContinueOnError)
+		fs := commandFlagSet("list")
 		if err := fs.Parse(args); err != nil {
-			return err
+			return options, err
 		}
-		return app.RunList(ctx, deps)
+		if fs.NArg() != 0 {
+			return options, fmt.Errorf("usage: md2obs list")
+		}
+		return options, nil
 
 	case "history":
-		fs := flag.NewFlagSet("history", flag.ContinueOnError)
+		fs := commandFlagSet("history")
 		if err := fs.Parse(args); err != nil {
-			return err
+			return options, err
 		}
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: md2obs history FILE")
+			return options, fmt.Errorf("usage: md2obs history FILE")
 		}
-		return app.RunHistory(ctx, deps, fs.Arg(0))
+		options.historyFile = fs.Arg(0)
+		return options, nil
 
 	case "status":
-		fs := flag.NewFlagSet("status", flag.ContinueOnError)
+		fs := commandFlagSet("status")
 		if err := fs.Parse(args); err != nil {
-			return err
+			return options, err
 		}
-		return app.RunStatus(ctx, deps)
+		if fs.NArg() != 0 {
+			return options, fmt.Errorf("usage: md2obs status")
+		}
+		return options, nil
 	}
-	return fmt.Errorf("unhandled command %q", command)
+	return options, fmt.Errorf("unhandled command %q", command)
+}
+
+func dispatch(ctx context.Context, deps *app.Deps, command string, options commandOptions) error {
+	switch command {
+	case "import":
+		return app.RunImport(ctx, deps, options.files)
+	case "watch":
+		return app.RunWatch(ctx, deps, options.watch)
+	case "list":
+		return app.RunList(ctx, deps)
+	case "history":
+		return app.RunHistory(ctx, deps, options.historyFile)
+	case "status":
+		return app.RunStatus(ctx, deps)
+	default:
+		return fmt.Errorf("unhandled command %q", command)
+	}
 }

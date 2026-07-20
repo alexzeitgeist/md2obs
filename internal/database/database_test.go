@@ -62,6 +62,30 @@ func TestSourceUniqueness(t *testing.T) {
 	}
 }
 
+func TestTouchSourceRequiresExistingIdentity(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	q := db.Query()
+
+	id, err := UpsertSource(ctx, q, "/a/x.md", "/a/x.md", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := TouchSource(ctx, q, id, "/a/x.md", "t2"); err != nil {
+		t.Fatalf("TouchSource existing identity: %v", err)
+	}
+	if err := TouchSource(ctx, q, id, "/a/other.md", "t3"); err == nil {
+		t.Fatal("TouchSource accepted a different canonical identity")
+	}
+	if err := TouchSource(ctx, q, id+100, "/a/x.md", "t3"); err == nil {
+		t.Fatal("TouchSource accepted a missing source ID")
+	}
+	sources, _, _, err := db.Counts(ctx)
+	if err != nil || sources != 1 {
+		t.Fatalf("source count = %d, err %v", sources, err)
+	}
+}
+
 func TestRevisionUniquenessPerSourceAndHash(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

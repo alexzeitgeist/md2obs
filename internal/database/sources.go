@@ -32,6 +32,26 @@ func UpsertSource(ctx context.Context, q Querier, canonicalPath, displayPath, no
 	return id, nil
 }
 
+// TouchSource refreshes an already-registered source without creating a new
+// row. The watcher uses this after pinning the source identity at startup.
+func TouchSource(ctx context.Context, q Querier, sourceID int64, canonicalPath, nowUTC string) error {
+	result, err := q.ExecContext(ctx, `
+		UPDATE sources SET last_seen_at_utc = ?
+		WHERE source_id = ? AND canonical_path = ?`,
+		nowUTC, sourceID, canonicalPath)
+	if err != nil {
+		return fmt.Errorf("touch source %s: %w", canonicalPath, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count touched source rows: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("registered source %s no longer exists", canonicalPath)
+	}
+	return nil
+}
+
 // GetSourceByPath returns nil when the canonical path is not registered.
 func GetSourceByPath(ctx context.Context, q Querier, canonicalPath string) (*Source, error) {
 	s := Source{CanonicalPath: canonicalPath}

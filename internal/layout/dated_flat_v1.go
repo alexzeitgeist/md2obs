@@ -6,7 +6,12 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"unicode/utf8"
 )
+
+// maxFilenameBytes is the common NAME_MAX component limit on supported Unix
+// filesystems. Layout v1 bounds every generated filename to this value.
+const maxFilenameBytes = 255
 
 // DatedFlatV1 materializes snapshots as <root>/YYYY-MM-DD/<name>, resolving
 // filename collisions by appending progressively more parent-directory
@@ -47,18 +52,29 @@ func (*DatedFlatV1) CandidatePaths(in CandidateInput) ([]string, error) {
 		}
 	}
 
-	names := []string{stem + suffix}
+	var names []string
+	seen := make(map[string]struct{})
+	addName := func(candidateStem string) {
+		name := boundedName(candidateStem, suffix, in.SourcePath)
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	addName(stem)
 	acc := stem
 	for _, p := range parts {
 		acc += "--" + p
-		names = append(names, acc+suffix)
+		addName(acc)
 	}
-	names = append(names, acc+"--"+shortHash(in.SourcePath)+suffix)
+	addName(acc + "--" + shortHash(in.SourcePath))
 
 	dateDir := in.SnapshotDate.Format("2006-01-02")
 	candidates := make([]string, len(names))
 	for i, n := range names {
-		candidates[i] = path.Join(in.RootDirectory, dateDir, avoidHidden(n))
+		candidates[i] = path.Join(in.RootDirectory, dateDir, n)
 	}
 	return candidates, nil
 }
@@ -100,6 +116,39 @@ func avoidHidden(name string) string {
 		return "_" + strings.TrimPrefix(name, ".")
 	}
 	return name
+}
+
+// boundedName keeps a filename within the layout's byte budget. When context
+// would make a candidate too long, it truncates on a UTF-8 boundary and keeps
+// a source-path hash so the shortened name remains deterministic and useful
+// for collision allocation.
+func boundedName(stem, suffix, sourcePath string) string {
+	stem = avoidHidden(stem)
+	if len(stem)+len(suffix) <= maxFilenameBytes {
+		return stem + suffix
+	}
+
+	marker := "--" + shortHash(sourcePath)
+	budget := maxFilenameBytes - len(marker) - len(suffix)
+	stem = strings.TrimRight(truncateUTF8(stem, budget), " .")
+	if stem == "" {
+		stem = "unnamed"
+	}
+	return stem + marker + suffix
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
 }
 
 // shortHash is the deterministic collision fallback: the first 6 hex digits

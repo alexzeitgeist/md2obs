@@ -81,15 +81,32 @@ func RunImport(ctx context.Context, d *Deps, files []string) error {
 	return nil
 }
 
-// ImportFile runs the full import operation for one source file: resolve,
-// hash, upsert source/revision/snapshot facts, apply the vault-change
-// policy, atomically materialize, and commit. The physical write happens
-// inside the database transaction so a failed write rolls everything back
-// (plan §12).
+// ImportFile runs the full explicit import operation for one source file.
 func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Result, error) {
+	return importFile(ctx, d, file, policy, nil)
+}
+
+// ImportWatchedSource imports a source selected from SQLite at watcher
+// startup. Re-resolving the event path must produce the same canonical
+// identity; the watcher is never allowed to register a different source.
+func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Source, policy Policy) (Result, error) {
+	return importFile(ctx, d, registered.CanonicalPath, policy, &registered)
+}
+
+// importFile resolves and hashes a source, updates its revision and snapshot
+// facts, applies the vault-change policy, atomically materializes the content,
+// and commits the database transaction. As documented in plan §12, a later
+// database failure cannot roll back a physical rename that already succeeded.
+func importFile(ctx context.Context, d *Deps, file string, policy Policy, registered *database.Source) (Result, error) {
 	canonical, display, err := source.Canonicalize(file)
 	if err != nil {
 		return Result{}, fmt.Errorf("import %s: %w", file, err)
+	}
+	if registered != nil {
+		if canonical != registered.CanonicalPath {
+			return Result{}, fmt.Errorf("watch source identity changed: registered %s now resolves to %s", registered.CanonicalPath, canonical)
+		}
+		display = registered.DisplayPath
 	}
 	res := Result{DisplayPath: display}
 
@@ -113,9 +130,17 @@ func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Resul
 	}
 	defer tx.Rollback()
 
-	srcID, err := database.UpsertSource(ctx, tx, canonical, display, nowUTC)
-	if err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", display, err)
+	var srcID int64
+	if registered == nil {
+		srcID, err = database.UpsertSource(ctx, tx, canonical, display, nowUTC)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+	} else {
+		srcID = registered.ID
+		if err := database.TouchSource(ctx, tx, srcID, canonical, nowUTC); err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
 	}
 	revID, err := database.FindOrCreateRevision(ctx, tx, srcID, sha, info.ByteSize, info.MtimeNS, nowUTC)
 	if err != nil {
@@ -143,20 +168,25 @@ func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Resul
 		}
 	}
 
-	// Unchanged: today's snapshot already references this revision and the
-	// vault file was written with it. Rewrite only if the file went missing.
+	// Unchanged: the database and the physical vault copy must all contain the
+	// same revision. Merely finding the destination is insufficient because an
+	// Obsidian edit may have changed its content since md2obs last wrote it.
 	if snap != nil && snap.RevisionID == revID && mat != nil && mat.WrittenRevisionID == revID {
 		destAbs, err := materialize.WithinRoot(vaultRoot, mat.RelativePath)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
-		if _, statErr := os.Stat(destAbs); statErr == nil {
+		current, readErr := os.ReadFile(destAbs)
+		if readErr == nil && source.HashBytes(current) == sha {
 			if err := tx.Commit(); err != nil {
 				return Result{}, fmt.Errorf("import %s: commit: %w", display, err)
 			}
 			res.Status = StatusUnchanged
 			res.RelPath = mat.RelativePath
 			return res, nil
+		}
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) && policy != PolicyOverwrite {
+			return Result{}, fmt.Errorf("import %s: read vault copy: %w", display, readErr)
 		}
 	}
 
@@ -284,10 +314,14 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 	if err != nil {
 		return "", err
 	}
+	validCandidates := 0
+	var containmentErr error
 	for _, rel := range candidates {
 		if _, err := materialize.WithinRoot(d.Config.VaultAbs, rel); err != nil {
+			containmentErr = err
 			continue
 		}
+		validCandidates++
 		owned, err := database.IsPathOwned(ctx, q, vaultID, rel)
 		if err != nil {
 			return "", err
@@ -295,6 +329,9 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 		if !owned {
 			return rel, nil
 		}
+	}
+	if validCandidates == 0 && containmentErr != nil {
+		return "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
 	}
 	return "", fmt.Errorf("no available destination filename for %s", canonical)
 }

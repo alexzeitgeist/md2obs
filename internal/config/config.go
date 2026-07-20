@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"md2obs/internal/safepath"
 )
 
 // Config is the resolved, validated configuration for one invocation.
@@ -172,6 +174,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("root_directory %q must not be hidden (leading dot)", c.RootDirectory)
 	}
 	c.RootDirectory = root
+	destResolved, err := safepath.ResolveExistingAncestor(c.DestRootAbs())
+	if err != nil {
+		return fmt.Errorf("resolve destination root %s: %w", c.DestRootAbs(), err)
+	}
+	destInside, err := safepath.Within(c.VaultAbs, destResolved, false)
+	if err != nil {
+		return err
+	}
+	if !destInside {
+		return fmt.Errorf("destination root %s resolves outside the vault %s", c.DestRootAbs(), c.VaultAbs)
+	}
 
 	if c.StateDBPath == "" {
 		return errors.New("no state database path resolved")
@@ -181,7 +194,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("resolve state database path %s: %w", c.StateDBPath, err)
 	}
 	c.StateDBPath = dbAbs
-	if dbAbs == c.VaultAbs || strings.HasPrefix(dbAbs, c.VaultAbs+string(os.PathSeparator)) {
+	dbResolved, err := safepath.ResolveExistingAncestor(dbAbs)
+	if err != nil {
+		return fmt.Errorf("resolve state database %s: %w", dbAbs, err)
+	}
+	dbInside, err := safepath.Within(c.VaultAbs, dbResolved, true)
+	if err != nil {
+		return err
+	}
+	if dbInside {
 		return fmt.Errorf("state database %s must live outside the vault %s", dbAbs, c.VaultAbs)
 	}
 	return nil

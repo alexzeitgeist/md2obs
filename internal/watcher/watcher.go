@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
+	"log/slog"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -16,7 +16,10 @@ import (
 // debounced per source and then passed to handle, serialized on this
 // goroutine. There is no periodic ticker: an idle watcher consumes no
 // user-space CPU.
-func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(path string), logw io.Writer) error {
+func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(path string), logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("create filesystem watcher: %w", err)
@@ -26,7 +29,7 @@ func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(pat
 	watched := 0
 	for _, parent := range ix.Parents() {
 		if err := w.Add(parent); err != nil {
-			fmt.Fprintf(logw, "warning: cannot watch %s: %v\n", parent, err)
+			logger.Warn("cannot watch directory", "parent", parent, "err", err)
 			continue
 		}
 		watched++
@@ -58,9 +61,9 @@ func Run(ctx context.Context, ix *Index, debounce time.Duration, handle func(pat
 				return nil
 			}
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				fmt.Fprintf(logw, "warning: notification queue overflowed; some changes may have been missed — re-run `md2obs import` on files you changed\n")
+				logger.Warn("notification queue overflowed; changes may have been missed", "action", "re-run md2obs import on files you changed")
 			} else {
-				fmt.Fprintf(logw, "watcher error: %v\n", err)
+				logger.Error("filesystem watcher error", "err", err)
 			}
 		case p := <-deb.C:
 			handle(p)

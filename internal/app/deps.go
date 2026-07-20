@@ -4,6 +4,8 @@ package app
 
 import (
 	"io"
+	"log/slog"
+	"sync"
 	"time"
 
 	"md2obs/internal/config"
@@ -20,6 +22,23 @@ type Deps struct {
 	Now    func() time.Time
 	Out    io.Writer
 	Err    io.Writer
+	Log    *slog.Logger
+
+	logOnce sync.Once
+}
+
+func (d *Deps) logger() *slog.Logger {
+	d.logOnce.Do(func() {
+		if d.Log != nil {
+			return
+		}
+		w := d.Err
+		if w == nil {
+			w = io.Discard
+		}
+		d.Log = slog.New(slog.NewTextHandler(w, nil))
+	})
+	return d.Log
 }
 
 const dateFormat = "2006-01-02"

@@ -69,6 +69,66 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDestinationSymlinkOutsideVault(t *testing.T) {
+	vault := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(vault, DefaultRootDirectory)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := &Config{
+		VaultPath:     vault,
+		Layout:        DefaultLayout,
+		RootDirectory: DefaultRootDirectory,
+		StateDBPath:   filepath.Join(t.TempDir(), "state.db"),
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "destination root") {
+		t.Fatalf("Validate error = %v, want destination-root rejection", err)
+	}
+}
+
+func TestValidateRejectsDatabaseThroughSymlinkIntoVault(t *testing.T) {
+	base := t.TempDir()
+	vault := filepath.Join(base, "vault")
+	dbDir := filepath.Join(vault, "database")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbLink := filepath.Join(base, "database-link")
+	if err := os.Symlink(dbDir, dbLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := &Config{
+		VaultPath:     vault,
+		Layout:        DefaultLayout,
+		RootDirectory: DefaultRootDirectory,
+		StateDBPath:   filepath.Join(dbLink, "state.db"),
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside the vault") {
+		t.Fatalf("Validate error = %v, want database containment rejection", err)
+	}
+}
+
+func TestValidateRejectsDanglingDatabaseSymlinkIntoVault(t *testing.T) {
+	base := t.TempDir()
+	vault := filepath.Join(base, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbLink := filepath.Join(base, "state-link.db")
+	if err := os.Symlink(filepath.Join(vault, "not-created.db"), dbLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := &Config{
+		VaultPath:     vault,
+		Layout:        DefaultLayout,
+		RootDirectory: DefaultRootDirectory,
+		StateDBPath:   dbLink,
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside the vault") {
+		t.Fatalf("Validate error = %v, want dangling database-symlink rejection", err)
+	}
+}
+
 func TestLoadFromFileAndEnv(t *testing.T) {
 	confHome := t.TempDir()
 	vault := t.TempDir()

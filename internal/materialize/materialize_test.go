@@ -36,6 +36,26 @@ func TestWriteAtomic(t *testing.T) {
 	}
 }
 
+func TestWriteAtomicCleansTempAfterReplaceFailure(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "note.md")
+	if err := os.Mkdir(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic(dest, []byte("content"), 0o644); err == nil {
+		t.Fatal("WriteAtomic unexpectedly replaced a directory")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".md2obs-tmp-") {
+			t.Fatalf("left temporary file %s after failed replace", entry.Name())
+		}
+	}
+}
+
 func TestWithinRoot(t *testing.T) {
 	root := t.TempDir()
 
@@ -56,5 +76,34 @@ func TestWithinRoot(t *testing.T) {
 		if _, err := WithinRoot(root, rel); err == nil {
 			t.Errorf("WithinRoot(%q) accepted", rel)
 		}
+	}
+}
+
+func TestWithinRootRejectsSymlinkedAncestorOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := WithinRoot(root, "redirect/missing/note.md"); err == nil {
+		t.Fatal("WithinRoot accepted a destination redirected outside by a symlink")
+	}
+}
+
+func TestWithinRootAllowsSymlinkedAncestorInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	got, err := WithinRoot(root, "redirect/note.md")
+	if err != nil {
+		t.Fatalf("WithinRoot rejected an internal symlink: %v", err)
+	}
+	if got != filepath.Join(root, "redirect", "note.md") {
+		t.Fatalf("destination = %q", got)
 	}
 }

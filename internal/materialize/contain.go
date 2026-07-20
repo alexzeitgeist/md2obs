@@ -5,12 +5,15 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"md2obs/internal/safepath"
 )
 
 // WithinRoot joins a vault-relative path (forward slashes) to the absolute
-// root and verifies the result stays strictly inside the root. Traversal
-// components are rejected before joining; the cleaned result is re-checked
-// as the final guard.
+// root and verifies the result stays strictly inside the physical root.
+// Traversal components are rejected before joining, then symlinks in the
+// nearest existing ancestors are resolved so a directory symlink cannot
+// redirect the write outside the vault.
 func WithinRoot(rootAbs, rel string) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("empty vault-relative path")
@@ -27,9 +30,20 @@ func WithinRoot(rootAbs, rel string) (string, error) {
 			return "", fmt.Errorf("vault-relative path %q contains a traversal component", rel)
 		}
 	}
-	joined := filepath.Join(filepath.Clean(rootAbs), filepath.FromSlash(cleaned))
-	root := filepath.Clean(rootAbs)
-	if joined == root || !strings.HasPrefix(joined, root+string(filepath.Separator)) {
+	root, err := safepath.ResolveExistingAncestor(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve vault root: %w", err)
+	}
+	joined := filepath.Join(root, filepath.FromSlash(cleaned))
+	resolved, err := safepath.ResolveExistingAncestor(joined)
+	if err != nil {
+		return "", fmt.Errorf("resolve destination %q: %w", rel, err)
+	}
+	inside, err := safepath.Within(root, resolved, false)
+	if err != nil {
+		return "", err
+	}
+	if !inside {
 		return "", fmt.Errorf("destination %q resolves outside the vault root", rel)
 	}
 	return joined, nil

@@ -106,3 +106,26 @@ func TestDebouncerStopCancelsPending(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 }
+
+func TestDebouncerIgnoresStaleGeneration(t *testing.T) {
+	d := NewDebouncer(time.Hour)
+	defer d.Stop()
+
+	const path = "/a/x.md"
+	d.Trigger(path)
+
+	d.mu.Lock()
+	entry := d.timers[path]
+	staleGeneration := entry.generation
+	entry.generation++
+	d.mu.Unlock()
+
+	// This models an expired AfterFunc callback that was already queued when a
+	// newer event advanced the source's timer generation.
+	d.fire(path, entry, staleGeneration)
+	select {
+	case got := <-d.C:
+		t.Fatalf("stale generation fired for %q", got)
+	default:
+	}
+}

@@ -74,6 +74,8 @@ Same-name files from different places get progressively more path context:
 `README.md`, `README--project-b.md`, `README--project-b--alex.md`, …, with a
 deterministic 6-hex-digit hash suffix as the final fallback. Explicit
 `import` always overwrites the vault copy, including edits made in Obsidian.
+Generated filename components are capped at 255 bytes; overlong collision
+names are truncated on a UTF-8 boundary and retain the source hash.
 
 ### watch
 
@@ -89,6 +91,9 @@ parent directories (non-recursively, via native filesystem notifications),
 and re-imports a source after its events settle. It never scans directories,
 never imports unrelated files, never rewrites anything at startup, and does
 no polling — idle, it consumes effectively no CPU. Stop it with Ctrl-C.
+The source identity selected from SQLite is pinned for the watch session. If
+the path is replaced by a symlink to another file, the event is rejected and
+reported rather than registering or importing the new target.
 
 `--on-vault-change` decides what happens when the vault copy was edited
 (for example on a phone, synced back) since md2obs last wrote it:
@@ -101,7 +106,8 @@ no polling — idle, it consumes effectively no CPU. Stop it with Ctrl-C.
 
 The check is a hash comparison against the last-written revision, done just
 before each overwrite — the vault itself is never watched, so an Obsidian
-edit alone produces no output; it is detected when the source next changes.
+edit alone produces no output; it is detected when the source next produces a
+relevant filesystem event.
 
 ### list / history / status
 
@@ -110,6 +116,16 @@ the database intends a newer revision than the vault file actually contains,
 e.g. after a skipped conflict). `history FILE` shows all dated snapshots for
 one source. `status` shows configuration, database location, schema version,
 and counts. All three are database queries only.
+
+## Path safety
+
+Before configuration is accepted and before each vault write, md2obs resolves
+symlinks through the nearest existing path ancestor. A destination root or
+date directory that redirects outside the vault is rejected. The same check
+keeps the SQLite database and its WAL files physically outside the vault even
+when `MD2OBS_STATE_DB` contains a symlinked parent. This is practical v1
+hardening, not a race-free sandbox: another process that swaps directory
+components between validation and the write can still create a TOCTOU race.
 
 ## Shell aliases
 
@@ -163,8 +179,12 @@ For anything you want to keep, duplicate the note into a normal folder
 - **`no vault configured`** — write the config file or set `MD2OBS_VAULT`.
 - **`vault … does not exist`** — `vault_path` must point at an existing
   directory (the vault root, not a subfolder).
-- **Watcher prints `parent directory missing`** — the source's directory is
-  gone; the source is skipped for this session. Re-import after it returns.
+- **Watcher logs `parent directory unavailable`** — the source's directory is
+  gone or inaccessible; the source is skipped for this session. Re-import
+  after it returns.
+- **Watcher logs `source identity changed`** — the registered path now resolves
+  through a symlink to a different file. Restore the original path or import
+  the new target explicitly.
 - **`notification queue overflowed`** — events may have been lost; re-run
   `md2obs import` on the files you changed.
 - **A file was imported under a `--project--…` name you didn't expect** —
@@ -185,6 +205,9 @@ tests first (see `internal/materialize/replace.go`).
 The full design rationale lives in `md2obs-implementation-plan.md`. Short
 version: SQLite (source → revision → snapshot → materialization) is the
 operational source of truth; vault paths are derived, replaceable
-materialization details; the watcher reacts only to exact registered paths;
-and the import transaction wraps the atomic vault write so a failed write
-rolls everything back.
+materialization details; and the watcher reacts only to exact registered
+source identities. The physical replacement occurs inside the SQLite
+transaction, so a failed physical write rolls back database changes. SQLite
+and the filesystem cannot commit atomically, however: a database failure after
+a successful rename can leave the vault ahead until a later import or a future
+`repair` command reconciles it.

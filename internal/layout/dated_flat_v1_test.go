@@ -1,9 +1,11 @@
 package layout
 
 import (
+	"path"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 var testDate = time.Date(2026, 7, 20, 12, 0, 0, 0, time.Local)
@@ -154,6 +156,29 @@ func TestContainment(t *testing.T) {
 		}
 		if !strings.HasPrefix(c, "_External/2026-07-20/") {
 			t.Errorf("candidate %q escapes the date folder", c)
+		}
+	}
+}
+
+func TestLongCandidatesStayWithinComponentLimit(t *testing.T) {
+	stem := strings.Repeat("é", 130)
+	got := candidates(t, CandidateInput{
+		SnapshotDate:  testDate,
+		SourcePath:    "/long/project/" + stem + ".md",
+		Basename:      stem + ".md",
+		ParentParts:   []string{strings.Repeat("parent", 50), "long"},
+		RootDirectory: "_External",
+	})
+	if len(got) == 0 {
+		t.Fatal("no candidates")
+	}
+	for _, candidate := range got {
+		name := path.Base(candidate)
+		if len(name) > maxFilenameBytes {
+			t.Errorf("candidate is %d bytes: %q", len(name), name)
+		}
+		if !utf8.ValidString(name) {
+			t.Errorf("candidate is not valid UTF-8: %q", name)
 		}
 	}
 }

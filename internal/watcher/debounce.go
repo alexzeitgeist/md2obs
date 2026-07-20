@@ -14,16 +14,21 @@ type Debouncer struct {
 	C        chan string
 
 	mu      sync.Mutex
-	timers  map[string]*time.Timer
+	timers  map[string]*timerEntry
 	done    chan struct{}
 	stopped bool
+}
+
+type timerEntry struct {
+	timer      *time.Timer
+	generation uint64
 }
 
 func NewDebouncer(interval time.Duration) *Debouncer {
 	return &Debouncer{
 		interval: interval,
 		C:        make(chan string, 64),
-		timers:   make(map[string]*time.Timer),
+		timers:   make(map[string]*timerEntry),
 		done:     make(chan struct{}),
 	}
 }
@@ -35,16 +40,26 @@ func (d *Debouncer) Trigger(path string) {
 	if d.stopped {
 		return
 	}
-	if t, ok := d.timers[path]; ok {
-		t.Reset(d.interval)
-		return
+	entry, ok := d.timers[path]
+	if !ok {
+		entry = &timerEntry{}
+		d.timers[path] = entry
+	} else {
+		entry.timer.Stop()
 	}
-	d.timers[path] = time.AfterFunc(d.interval, func() { d.fire(path) })
+	entry.generation++
+	generation := entry.generation
+	entry.timer = time.AfterFunc(d.interval, func() { d.fire(path, entry, generation) })
 }
 
-func (d *Debouncer) fire(path string) {
+func (d *Debouncer) fire(path string, entry *timerEntry, generation uint64) {
 	d.mu.Lock()
 	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
+	current, ok := d.timers[path]
+	if !ok || current != entry || current.generation != generation {
 		d.mu.Unlock()
 		return
 	}
@@ -65,8 +80,8 @@ func (d *Debouncer) Stop() {
 		return
 	}
 	d.stopped = true
-	for _, t := range d.timers {
-		t.Stop()
+	for _, entry := range d.timers {
+		entry.timer.Stop()
 	}
 	clear(d.timers)
 	close(d.done)
