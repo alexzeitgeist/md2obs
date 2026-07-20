@@ -7,8 +7,9 @@ normal vault files, so Obsidian Sync distributes them to phones and tablets.
 The original file stays where it is and remains the content source of truth.
 The vault copy is a dated, derived snapshot — an import journal, not a
 bidirectional sync. Nothing is ever discovered or imported automatically; the
-only way a file enters the vault is `md2obs import` (or the watcher
-re-importing a file you already imported).
+only way a file enters the vault is an explicit `md2obs FILE...` invocation
+(`md2obs import FILE...` is equivalent), or the watcher re-importing a file
+you already imported.
 
 ## Install
 
@@ -49,6 +50,7 @@ database must not be placed inside the vault.
 ## Commands
 
 ```console
+md2obs FILE...                         # import is the default command
 md2obs import FILE...
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs list
@@ -59,6 +61,8 @@ md2obs status
 ### import
 
 ```console
+md2obs ~/projects/a/README.md /tmp/response.md
+# Equivalent explicit form:
 md2obs import ~/projects/a/README.md /tmp/response.md
 ```
 
@@ -133,7 +137,7 @@ Fish:
 
 ```fish
 function oi --description "Import Markdown into Obsidian"
-    command md2obs import $argv
+    command md2obs $argv
 end
 
 function ow --description "Watch recently imported Markdown files"
@@ -144,7 +148,7 @@ end
 Bash:
 
 ```bash
-alias oi='md2obs import'
+alias oi='md2obs'
 alias ow='md2obs watch'
 ```
 

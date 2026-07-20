@@ -23,6 +23,7 @@ import (
 const usage = `md2obs imports explicitly selected Markdown files into an Obsidian vault.
 
 Usage:
+  md2obs FILE...
   md2obs import FILE...
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs list
@@ -31,7 +32,8 @@ Usage:
 
 Commands:
   import   Import (or refresh) the named Markdown files into today's
-           dated vault folder. Explicit imports always overwrite.
+           dated vault folder. This is the default when the command is
+           omitted. Explicit imports always overwrite.
   watch    Watch sources with snapshots dated today (--days N widens the
            window to N calendar days) and re-import them when they change.
            --debounce sets the per-source quiet period (default 500ms).
@@ -48,7 +50,9 @@ Configuration:
 `
 
 var commandUsage = map[string]string{
-	"import": `Usage: md2obs import FILE...
+	"import": `Usage:
+  md2obs FILE...
+  md2obs import FILE...
 
 Import or refresh explicitly named Markdown files. An explicit import restores
 the source content if the vault copy was edited.
@@ -86,16 +90,17 @@ func run(args []string) int {
 		return 2
 	}
 	command := args[0]
+	commandArgs := args[1:]
 	switch command {
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
 	case "import", "watch", "list", "history", "status":
 	default:
-		fmt.Fprintf(os.Stderr, "md2obs: unknown command %q\n\n%s", command, usage)
-		return 2
+		command = "import"
+		commandArgs = args
 	}
-	options, err := parseCommand(command, args[1:])
+	options, err := parseCommand(command, commandArgs)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(os.Stdout, commandUsage[command])

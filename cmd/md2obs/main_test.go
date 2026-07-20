@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,46 @@ func TestRunCommandHelp(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
+	}
+}
+
+func TestRunDefaultsToImport(t *testing.T) {
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := t.TempDir()
+	first := filepath.Join(sourceDir, "first.md")
+	second := filepath.Join(sourceDir, "second.md")
+	if err := os.WriteFile(first, []byte("# first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("# second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("MD2OBS_VAULT", vault)
+	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
+
+	code, stdout, stderr := captureRun(t, []string{first, second})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+	if got := strings.Count(stdout, "imported: "); got != 2 {
+		t.Fatalf("imported results = %d, want 2; stdout:\n%s", got, stdout)
+	}
+
+	vaultFiles, err := filepath.Glob(filepath.Join(vault, "_External", "*", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vaultFiles) != 2 {
+		t.Fatalf("vault files = %v, want two imported Markdown files", vaultFiles)
 	}
 }
 
