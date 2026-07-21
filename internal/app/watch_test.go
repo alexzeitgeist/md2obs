@@ -40,8 +40,6 @@ func TestDateRange(t *testing.T) {
 
 func TestWatchNoSources(t *testing.T) {
 	env := newTestEnv(t)
-	ready := make(chan struct{})
-	env.deps.WatchReady = func() { close(ready) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -55,11 +53,6 @@ func TestWatchNoSources(t *testing.T) {
 		cancel()
 		<-done
 		t.Fatalf("empty watcher did not stay running; output:\n%s", env.out.String())
-	}
-	select {
-	case <-ready:
-	case <-time.After(5 * time.Second):
-		t.Fatal("watcher did not signal readiness")
 	}
 	cancel()
 	if err := <-done; err != nil {

@@ -55,9 +55,6 @@ md2obs FILE...                         # import is the default command
 md2obs import FILE...
 md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
-md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
-md2obs watch stop
-md2obs watch restart [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs list
 md2obs history FILE
 md2obs status
@@ -121,28 +118,16 @@ vault copy. This is intentional: refresh catches up source changes; it does not
 audit historical vault materializations or reconstruct intermediate versions
 that existed while no watcher was running.
 
-A completed pass notifies a running watcher once so sources newly materialized
-today can join its session. For managed startup, start the watcher first and
-then run refresh, minimizing the gap in which another source edit could occur:
-
-```console
-md2obs watch start --days 3
-md2obs refresh --all
-```
+A completed pass notifies a running foreground watcher once so sources newly
+materialized today can join its session.
 
 ### watch
 
 ```console
-md2obs watch                         # foreground; sources imported today
+md2obs watch                         # sources imported today
 md2obs watch --days 3                # today and the previous two days
 md2obs watch --debounce 500ms        # per-source quiet period (default)
 md2obs watch --on-vault-change=preserve
-
-md2obs watch start --days 3          # start the managed background watcher
-md2obs watch start --log             # append output beside the state database
-md2obs status                        # includes active watcher state
-md2obs watch stop                    # SIGTERM, then wait for graceful exit
-md2obs watch restart                 # preserve the running watcher's settings
 ```
 
 The watcher selects recent sources materialized in the configured vault,
@@ -154,62 +139,25 @@ same state database are not watched or materialized here.
 Successful explicit imports into this vault automatically join an already
 running watcher, including imports from directories it was not previously
 watching. A watcher started with no eligible sources stays running and waits
-for imports. Membership grows until restart; it is not reduced as the date
-window advances. The discovery range expands across midnight so an import
-immediately before midnight is not missed when its notification arrives just
-after midnight.
+for imports. Membership grows for the life of the foreground session; it is
+not reduced as the date window advances. A new invocation recalculates the
+window. The discovery range expands across midnight so an import immediately
+before midnight is not missed when its notification arrives just after
+midnight.
 
 Startup is passive and never rewrites existing vault copies. A source enrolled
 after startup gets one silent content check after its directory watch is armed,
 closing the small import-to-watch race; matching content causes no vault write
 and does not evaluate `--on-vault-change`. The watcher never scans directories,
 never imports unrelated files, and does no polling — idle, it consumes
-effectively no CPU. Bare `md2obs watch` remains a foreground command; stop it
-with Ctrl-C. Run `md2obs refresh` when startup should be followed by an explicit
-one-shot source catch-up.
+effectively no CPU. `md2obs watch` stays in the foreground until interrupted;
+stop it with Ctrl-C. Run `md2obs refresh` for an explicit one-shot source
+catch-up before or after a watch session.
 
-`watch start` runs the same watcher in a detached background session on Linux
-or macOS. The starting command waits until the initial database selection and
-filesystem watches are armed, then prints the daemon PID. A configuration,
-database, lease, or watcher startup error therefore still returns a non-zero
-status to the caller. Daemon output is discarded by default, so no log file is
-created. Add `--log` to append standard output and errors to
-`<state-database>.watch.log`, with permissions restricted to the current user:
-
-```console
-$ md2obs watch start --log --days 3
-Started md2obs watch daemon (PID 12345)
-Log: /home/alex/.local/share/md2obs/state.db.watch.log
-$ md2obs status
-...
-Watcher:           running as daemon (PID 12345, started 2026-07-21T10:15:00+02:00)
-$ md2obs watch stop
-Stopped md2obs watch daemon (PID 12345)
-```
-
-Exactly one watcher—foreground or managed—is allowed for each resolved
-`(state database, vault)` pair. Bare `watch` and `watch start` acquire the same
-exclusive lease, so concurrent starts and foreground/daemon overlap cannot
-create duplicate watchers. The durable record identifies the mode and contains
-the PID, a random instance ID, kernel process-start identity, start time,
-scope, and watch settings. An unlocked record left by a crash or `SIGKILL` is
-stale and is removed by the next watcher or lifecycle command. The identity
-check prevents `watch stop` from signaling an unrelated process if the stored
-PID has been reused. `md2obs status` distinguishes `running in foreground`
-from `running as daemon`.
-
-`watch stop` sends `SIGTERM` and waits up to 10 seconds for the daemon to close
-its database and filesystem watches and release its lease. It reports a clear
-error if graceful shutdown times out; it never escalates to `SIGKILL`. If the
-active lease belongs to a foreground watcher, `watch stop` refuses to signal it
-and directs the user to stop that terminal with Ctrl-C.
-
-`watch restart` stops and starts the managed instance. With no options it
-preserves the running instance's `--days`, `--debounce`,
-`--on-vault-change`, and `--log` settings. Supplying any option selects a new
-complete set, with defaults for the options not supplied. If no watcher is
-running, `restart` starts a managed instance with the supplied settings or
-defaults.
+Only one watcher may run for each resolved `(state database, vault)` pair on
+Linux and macOS. A second invocation exits with an error. The operating system
+releases the foreground watcher's lock when it exits, including after an
+abnormal termination; md2obs stores no process record or watcher settings.
 
 Each source identity is pinned when it is enrolled. If its path is replaced by
 a symlink to another file, the event is rejected and reported rather than
@@ -236,9 +184,8 @@ the snapshot references a different revision from the last revision md2obs
 recorded writing at that path, for example after a skipped conflict. It is a
 database-state label, not the result of inspecting the current vault file.
 `history FILE` shows all dated snapshots for one source. `status` shows
-configuration, database location, schema version, counts, and active-watcher
-state. `list` and `history` are database queries only; status also inspects and,
-when necessary, cleans the active watcher record.
+configuration, database location, schema version, and counts. All three are
+database queries only.
 
 ## Path safety
 
@@ -291,9 +238,8 @@ For anything you want to keep, duplicate the note into a normal folder
 2. `md2obs import` a Markdown file from outside the vault.
 3. Confirm it appears under `_External/<today>/` and Obsidian indexes it.
 4. Confirm Sync uploads it and it appears on the phone.
-5. Modify the source while `md2obs watch` runs (in the foreground or after
-   `md2obs watch start`); confirm the same-day vault
-   file updates (and syncs).
+5. Modify the source while `md2obs watch` runs; confirm the same-day vault file
+   updates (and syncs).
 6. Create another Markdown file in the same source directory; confirm it is
    *not* imported.
 7. Stop the watcher; confirm later source changes are not imported.
@@ -309,12 +255,16 @@ For anything you want to keep, duplicate the note into a normal folder
 - **Watcher logs `source identity changed`** — the registered path now resolves
   through a symlink to a different file. Restore the original path or import
   the new target explicitly.
+- **`another watcher is already running`** — stop the foreground watcher in its
+  existing terminal with Ctrl-C before starting another for the same database
+  and vault. After upgrading from a version with the background daemon, kill
+  any leftover daemon process from the previous version.
 - **`notification queue overflowed`** — source changes or new enrollments may
   have been lost; run `md2obs refresh --all`, or re-run `md2obs import` on the
   affected files if they are known.
 - **Import warns that running watchers may need to be restarted** — the import
-  itself committed, but its cross-process watcher notification failed. Run
-  `md2obs watch restart`, or fix the reported state-directory error and
+  itself committed, but its cross-process watcher notification failed. Stop and
+  run `md2obs watch` again, or fix the reported state-directory error and
   re-import.
 - **Import reports a database or commit failure** — the vault and SQLite cannot
   commit atomically, so a successful vault write may outlive a later database

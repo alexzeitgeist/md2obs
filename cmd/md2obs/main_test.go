@@ -1,17 +1,14 @@
 package main
 
 import (
-	"context"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"md2obs/internal/app"
-	"md2obs/internal/config"
 )
 
 func TestParseCommand(t *testing.T) {
@@ -30,14 +27,12 @@ func TestParseCommand(t *testing.T) {
 		{"refresh invalid days", "refresh", []string{"--days=0"}, "--days must be at least 1"},
 		{"refresh invalid policy", "refresh", []string{"--on-vault-change=bogus"}, "invalid --on-vault-change"},
 		{"watch", "watch", []string{"--days", "3", "--debounce", "750ms", "--on-vault-change=preserve"}, ""},
-		{"watch start", "watch", []string{"start", "--log", "--days", "3"}, ""},
-		{"watch stop", "watch", []string{"stop"}, ""},
-		{"watch restart", "watch", []string{"restart", "--debounce=1s"}, ""},
 		{"watch positional", "watch", []string{"extra"}, "usage: md2obs watch"},
+		{"watch removed start command", "watch", []string{"start"}, "usage: md2obs watch"},
+		{"watch removed stop command", "watch", []string{"stop"}, "usage: md2obs watch"},
+		{"watch removed restart command", "watch", []string{"restart"}, "usage: md2obs watch"},
 		{"watch removed daemon flag", "watch", []string{"--daemon"}, "flag provided but not defined"},
-		{"watch removed status command", "watch", []string{"status"}, "usage: md2obs watch"},
-		{"watch log only managed", "watch", []string{"--log"}, "flag provided but not defined"},
-		{"watch stop positional", "watch", []string{"stop", "extra"}, "usage: md2obs watch stop"},
+		{"watch removed log flag", "watch", []string{"--log"}, "flag provided but not defined"},
 		{"watch invalid days", "watch", []string{"--days", "0"}, "--days must be at least 1"},
 		{"watch invalid debounce", "watch", []string{"--debounce", "0s"}, "--debounce must be positive"},
 		{"watch invalid policy", "watch", []string{"--on-vault-change=bogus"}, "invalid --on-vault-change"},
@@ -85,19 +80,13 @@ func TestParseRefreshOptions(t *testing.T) {
 }
 
 func TestParseWatchOptions(t *testing.T) {
-	got, err := parseCommand("watch", []string{"start", "--log", "--days=3", "--debounce=750ms", "--on-vault-change=preserve"})
+	got, err := parseCommand("watch", []string{"--days=3", "--debounce=750ms", "--on-vault-change=preserve"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := app.WatchOptions{Days: 3, Debounce: 750 * time.Millisecond, OnVaultChange: app.PolicyPreserve}
 	if got.watch != want {
 		t.Fatalf("watch options = %+v, want %+v", got.watch, want)
-	}
-	if got.watchAction != watchStart {
-		t.Fatalf("watch action = %v, want start", got.watchAction)
-	}
-	if !got.log {
-		t.Fatal("--log was not recorded")
 	}
 }
 
@@ -121,6 +110,27 @@ func TestRunReportsUsageBeforeLoadingConfig(t *testing.T) {
 	}
 }
 
+func TestRunRemovedWatchCommandsReportUsageBeforeLoadingConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	for _, command := range []string{"start", "stop", "restart"} {
+		t.Run(command, func(t *testing.T) {
+			code, stdout, stderr := captureRun(t, []string{"watch", command})
+			if code != 2 || stdout != "" {
+				t.Fatalf("watch %s = %d, stdout = %q, stderr = %q", command, code, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "usage: md2obs watch [OPTIONS]") {
+				t.Fatalf("watch %s stderr = %q", command, stderr)
+			}
+			if strings.Contains(stderr, "no vault configured") {
+				t.Fatalf("configuration masked watch %s usage error: %q", command, stderr)
+			}
+		})
+	}
+}
+
 func TestRunCommandHelp(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MD2OBS_VAULT", "")
@@ -133,13 +143,15 @@ func TestRunCommandHelp(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
 	}
-	for _, want := range []string{"md2obs watch [OPTIONS]", "md2obs watch start [OPTIONS]", "md2obs watch stop", "--log", "--debounce", "--on-vault-change"} {
+	for _, want := range []string{"md2obs watch [OPTIONS]", "stays in the foreground", "--debounce", "--on-vault-change"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "md2obs watch status") {
-		t.Errorf("watch help still advertises the removed status subcommand:\n%s", stdout)
+	for _, removed := range []string{"watch start", "watch stop", "watch restart", "--log", "daemon", "Managed watcher"} {
+		if strings.Contains(stdout, removed) {
+			t.Errorf("watch help still advertises removed daemon text %q:\n%s", removed, stdout)
+		}
 	}
 }
 
@@ -159,220 +171,7 @@ func TestRunRefreshHelp(t *testing.T) {
 	}
 }
 
-func TestRunWatchDaemonDelegatesAfterValidatingConfig(t *testing.T) {
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stateDB := filepath.Join(root, "state", "state.db")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", stateDB)
-	t.Setenv(daemonChildEnv, "")
-
-	original := launchWatchDaemon
-	t.Cleanup(func() { launchWatchDaemon = original })
-	called := false
-	launchWatchDaemon = func(_ context.Context, executable string, args []string, cfg *config.Config, logging bool) (daemonProcess, error) {
-		called = true
-		if executable == "" {
-			t.Fatal("daemon executable was empty")
-		}
-		if strings.Join(args, " ") != "watch start --days=2 --debounce=500ms --on-vault-change=skip" {
-			t.Fatalf("daemon args = %q", args)
-		}
-		if cfg.VaultAbs != vault || cfg.StateDBPath != stateDB {
-			t.Fatalf("daemon config = %+v", cfg)
-		}
-		if logging {
-			t.Fatal("daemon logging was enabled by default")
-		}
-		return daemonProcess{PID: 1234}, nil
-	}
-
-	code, stdout, stderr := captureRun(t, []string{"watch", "start", "--days=2"})
-	if code != 0 || stderr != "" {
-		t.Fatalf("run = %d, stderr = %q", code, stderr)
-	}
-	if !called {
-		t.Fatal("daemon launcher was not called")
-	}
-	if !strings.Contains(stdout, "PID 1234") {
-		t.Errorf("stdout does not contain daemon PID: %q", stdout)
-	}
-	if strings.Contains(stdout, "Log:") {
-		t.Errorf("stdout unexpectedly reports a log: %q", stdout)
-	}
-	if _, err := os.Stat(stateDB); !os.IsNotExist(err) {
-		t.Fatalf("parent unexpectedly opened state database: %v", err)
-	}
-}
-
-func TestRunWatchDaemonReportsOptInLog(t *testing.T) {
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stateDB := filepath.Join(root, "state", "state.db")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", stateDB)
-	t.Setenv(daemonChildEnv, "")
-
-	original := launchWatchDaemon
-	t.Cleanup(func() { launchWatchDaemon = original })
-	launchWatchDaemon = func(_ context.Context, _ string, _ []string, _ *config.Config, logging bool) (daemonProcess, error) {
-		if !logging {
-			t.Fatal("daemon logging was not enabled")
-		}
-		return daemonProcess{PID: 1234, LogPath: stateDB + ".watch.log"}, nil
-	}
-
-	code, stdout, stderr := captureRun(t, []string{"watch", "start", "--log"})
-	if code != 0 || stderr != "" {
-		t.Fatalf("run = %d, stderr = %q", code, stderr)
-	}
-	for _, want := range []string{"PID 1234", "Log: " + stateDB + ".watch.log"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout does not contain %q: %q", want, stdout)
-		}
-	}
-}
-
-func TestRunWatchStopWhenStoppedDoesNotOpenDatabase(t *testing.T) {
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stateDB := filepath.Join(root, "state", "state.db")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", stateDB)
-	t.Setenv(daemonChildEnv, "")
-
-	code, stdout, stderr := captureRun(t, []string{"watch", "stop"})
-	if code != 0 || stderr != "" {
-		t.Fatalf("watch stop = %d, stderr = %q", code, stderr)
-	}
-	if !strings.Contains(stdout, "No md2obs watch daemon is running") {
-		t.Fatalf("watch stop output = %q", stdout)
-	}
-	if _, err := os.Stat(stateDB); !os.IsNotExist(err) {
-		t.Fatalf("watch stop unexpectedly opened state database: %v", err)
-	}
-}
-
-func TestRunWatchStartRejectsRunningManagedInstance(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("managed watcher is supported only on Linux and macOS")
-	}
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stateDB := filepath.Join(root, "state", "state.db")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", stateDB)
-	t.Setenv(daemonChildEnv, "")
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, release, err := claimManagedWatch(cfg, watchModeManaged, managedWatchSettings{
-		Days:          1,
-		Debounce:      "500ms",
-		OnVaultChange: "skip",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	original := launchWatchDaemon
-	t.Cleanup(func() { launchWatchDaemon = original })
-	launchWatchDaemon = func(context.Context, string, []string, *config.Config, bool) (daemonProcess, error) {
-		t.Fatal("duplicate start reached daemon launcher")
-		return daemonProcess{}, nil
-	}
-
-	code, stdout, stderr := captureRun(t, []string{"watch", "start"})
-	if code != 1 || stdout != "" {
-		t.Fatalf("duplicate start = %d, stdout = %q, stderr = %q", code, stdout, stderr)
-	}
-	if !strings.Contains(stderr, "already running") || !strings.Contains(stderr, "PID") {
-		t.Fatalf("duplicate start stderr = %q", stderr)
-	}
-}
-
-func TestRunWatchStartRejectsForegroundInstanceAndStatusReportsIt(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("watcher lease is supported only on Linux and macOS")
-	}
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stateDB := filepath.Join(root, "state", "state.db")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", stateDB)
-	t.Setenv(daemonChildEnv, "")
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, release, err := claimManagedWatch(cfg, watchModeForeground, managedWatchSettings{
-		Days:          1,
-		Debounce:      "500ms",
-		OnVaultChange: "skip",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	code, stdout, stderr := captureRun(t, []string{"status"})
-	if code != 0 || stderr != "" {
-		t.Fatalf("status = %d, stderr = %q", code, stderr)
-	}
-	if !strings.Contains(stdout, "Watcher:") || !strings.Contains(stdout, "running in foreground") {
-		t.Fatalf("foreground status output = %q", stdout)
-	}
-
-	original := launchWatchDaemon
-	t.Cleanup(func() { launchWatchDaemon = original })
-	launchWatchDaemon = func(context.Context, string, []string, *config.Config, bool) (daemonProcess, error) {
-		t.Fatal("foreground conflict reached daemon launcher")
-		return daemonProcess{}, nil
-	}
-	code, stdout, stderr = captureRun(t, []string{"watch", "start"})
-	if code != 1 || stdout != "" {
-		t.Fatalf("start with foreground watcher = %d, stdout = %q, stderr = %q", code, stdout, stderr)
-	}
-	for _, want := range []string{"running in foreground", "PID", "Ctrl-C"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("foreground conflict does not contain %q: %q", want, stderr)
-		}
-	}
-
-	code, stdout, stderr = captureRun(t, []string{"watch", "restart"})
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "stop it with Ctrl-C") {
-		t.Fatalf("restart with foreground watcher = %d, stdout = %q, stderr = %q", code, stdout, stderr)
-	}
-}
-
-func TestRunForegroundWatchRejectsManagedInstance(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("watcher lease is supported only on Linux and macOS")
-	}
+func TestRunStatusReportsDatabaseStateOnly(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
 	if err := os.Mkdir(vault, 0o755); err != nil {
@@ -381,62 +180,18 @@ func TestRunForegroundWatchRejectsManagedInstance(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("MD2OBS_VAULT", vault)
 	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
-	t.Setenv(daemonChildEnv, "")
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, release, err := claimManagedWatch(cfg, watchModeManaged, managedWatchSettings{
-		Days:          1,
-		Debounce:      "500ms",
-		OnVaultChange: "skip",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	code, stdout, stderr := captureRun(t, []string{"watch"})
-	if code != 1 || stdout != "" {
-		t.Fatalf("foreground watch with daemon = %d, stdout = %q, stderr = %q", code, stdout, stderr)
-	}
-	if !strings.Contains(stderr, "running as a daemon") || !strings.Contains(stderr, "PID") {
-		t.Fatalf("managed conflict stderr = %q", stderr)
-	}
-}
-
-func TestManagedWatchArgsAreCanonical(t *testing.T) {
-	options, err := parseCommand("watch", []string{"restart", "--days=4", "--debounce=1250ms", "--on-vault-change=overwrite", "--log"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	applyManagedSettings(&options, managedSettings(options))
-	want := "watch start --days=4 --debounce=1.25s --on-vault-change=overwrite --log"
-	if got := strings.Join(managedWatchArgs(options), " "); got != want {
-		t.Fatalf("managed args = %q, want %q", got, want)
-	}
-}
-
-func TestRunStatusIncludesWatcherState(t *testing.T) {
-	root := t.TempDir()
-	vault := filepath.Join(root, "vault")
-	if err := os.Mkdir(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("MD2OBS_VAULT", vault)
-	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
-	t.Setenv(daemonChildEnv, "")
 
 	code, stdout, stderr := captureRun(t, []string{"status"})
 	if code != 0 || stderr != "" {
 		t.Fatalf("status = %d, stderr = %q", code, stderr)
 	}
-	for _, want := range []string{"Schema version:", "Watcher:", "stopped"} {
+	for _, want := range []string{"Schema version:", "Sources:", "Snapshots:", "Materializations:"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("status output does not contain %q:\n%s", want, stdout)
 		}
+	}
+	if strings.Contains(stdout, "Watcher:") {
+		t.Errorf("status output still contains removed watcher lifecycle state:\n%s", stdout)
 	}
 }
 

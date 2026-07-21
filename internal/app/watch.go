@@ -133,9 +133,6 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		Ready: func(stats watcher.Stats) {
 			fmt.Fprintf(d.Out, "Watching %d imported sources from %d directories\n", stats.Sources, stats.Directories)
 			fmt.Fprintf(d.Out, "Date range: %s through %s\n", discoveryFrom, discoveryTo)
-			if d.WatchReady != nil {
-				d.WatchReady()
-			}
 		},
 	}, d.logger())
 }
