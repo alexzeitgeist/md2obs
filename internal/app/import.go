@@ -108,7 +108,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	}
 	if registered != nil {
 		if canonical != registered.CanonicalPath {
-			return Result{}, fmt.Errorf("watch source identity changed: registered %s now resolves to %s", registered.CanonicalPath, canonical)
+			return Result{}, fmt.Errorf("source identity changed: registered %s now resolves to %s", registered.CanonicalPath, canonical)
 		}
 		display = registered.DisplayPath
 	}

@@ -524,7 +524,7 @@ func TestWatchedImportRejectsRetargetedSourceSymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := ImportWatchedSource(ctx, env.deps, *registered, PolicySkip); err == nil || !strings.Contains(err.Error(), "identity changed") {
+	if _, err := ImportWatchedSource(ctx, env.deps, *registered, PolicySkip); err == nil || !strings.HasPrefix(err.Error(), "source identity changed:") {
 		t.Fatalf("watched import error = %v, want identity-change rejection", err)
 	}
 	sources, snapshots, materializations, err := env.deps.DB.Counts(ctx)

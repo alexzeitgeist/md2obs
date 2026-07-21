@@ -111,8 +111,11 @@ for catch-up after an unknown amount of downtime or after a filesystem
 notification overflow. `--days` and `--all` are mutually exclusive.
 
 Like the watcher, refresh defaults to `--on-vault-change=skip`; `preserve` and
-`overwrite` have the same meanings described below. The policy is evaluated
-only when the source changed. If the source still matches its selected
+`overwrite` have the same meanings described below. The policy is consulted
+only when the source changed and refresh would replace an existing
+materialization for today's snapshot in this vault. When catch-up creates a new
+dated snapshot, earlier vault copies — including edits — remain untouched and
+are not treated as conflicts. If the source still matches its selected
 snapshot, refresh does not inspect, restore, or overwrite an edited or deleted
 vault copy. It converges to the source's current content and cannot reconstruct
 intermediate versions that existed while no watcher was running; broader

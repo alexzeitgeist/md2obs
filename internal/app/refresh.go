@@ -65,7 +65,7 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 		}
 		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange)
 		if err != nil {
-			fmt.Fprintf(d.Err, "error: refresh %s: %v\n", candidate.DisplayPath, err)
+			fmt.Fprintf(d.Err, "error: refresh: %v\n", err)
 			failed++
 			continue
 		}
@@ -98,10 +98,14 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 			fmt.Fprintf(d.Err, "warning: refresh completed, but running watchers may need to be restarted: %v\n", err)
 		}
 	}
+	sourceWord := "sources"
+	if len(candidates) == 1 {
+		sourceWord = "source"
+	}
 	fmt.Fprintf(
 		d.Out,
-		"Checked %d sources: %d refreshed, %d conflicts skipped, %d unchanged, %d missing, %d failed\n",
-		len(candidates), refreshed, conflicts, unchanged, missing, failed,
+		"Checked %d %s: %d refreshed, %d conflicts skipped, %d unchanged, %d missing, %d failed\n",
+		len(candidates), sourceWord, refreshed, conflicts, unchanged, missing, failed,
 	)
 
 	if failed > 0 {

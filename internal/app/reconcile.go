@@ -37,7 +37,7 @@ func reconcileWatchCandidate(
 	}
 	if canonical != candidate.CanonicalPath {
 		return candidateReconcileResult{}, fmt.Errorf(
-			"watch source identity changed: registered %s now resolves to %s",
+			"source identity changed: registered %s now resolves to %s",
 			candidate.CanonicalPath,
 			canonical,
 		)

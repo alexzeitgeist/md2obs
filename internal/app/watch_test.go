@@ -620,7 +620,7 @@ func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "watch source identity changed")
+		return strings.Contains(env.out.String(), "source identity changed")
 	}) {
 		t.Fatalf("dynamic identity change was not reported; output:\n%s", env.out.String())
 	}

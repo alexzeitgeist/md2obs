@@ -87,8 +87,49 @@ func TestRunRefreshAllIncludesOlderMaterialization(t *testing.T) {
 		t.Fatalf("--all did not materialize current source; output:\n%s", env.out.String())
 	}
 	output := env.out.String()
-	if !strings.Contains(output, "Checked 0 sources") || !strings.Contains(output, "Checked 1 sources: 1 refreshed") {
+	if !strings.Contains(output, "Checked 0 sources") || !strings.Contains(output, "Checked 1 source: 1 refreshed") {
 		t.Fatalf("refresh summaries do not show date-window behavior:\n%s", output)
+	}
+}
+
+func TestRunRefreshAllCreatesNewDayAlongsideOlderVaultEdit(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "cross-day.md", "# day one\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstVault := filepath.Join(env.vault, filepath.FromSlash(first.RelPath))
+	if err := os.WriteFile(firstVault, []byte("# phone edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env.setNow(time.Date(2026, 7, 21, 10, 0, 0, 0, time.Local))
+	if err := os.WriteFile(src, []byte("# day two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{All: true, OnVaultChange: PolicySkip}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := env.vaultFile(t, first.RelPath); got != "# phone edit\n" {
+		t.Fatalf("older vault edit was changed: %q", got)
+	}
+	if !vaultContainsContent(t, env.vault, "# day two\n") {
+		t.Fatalf("current source was not materialized on the new day; output:\n%s", env.out.String())
+	}
+	output := env.out.String()
+	for _, want := range []string{
+		"imported: " + src,
+		"Checked 1 source: 1 refreshed, 0 conflicts skipped",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output does not contain %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "skipped: "+src) {
+		t.Fatalf("older vault edit was reported as a same-day conflict:\n%s", output)
 	}
 }
 
@@ -161,7 +202,7 @@ func TestRunRefreshContinuesPastMissingAndIdentityFailures(t *testing.T) {
 	}
 	output := env.out.String()
 	for _, want := range []string{
-		"watch source identity changed",
+		"error: refresh: source identity changed",
 		"Checked 3 sources: 1 refreshed, 0 conflicts skipped, 0 unchanged, 1 missing, 1 failed",
 	} {
 		if !strings.Contains(output, want) {
