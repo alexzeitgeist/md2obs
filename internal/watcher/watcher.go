@@ -38,7 +38,8 @@ type Options struct {
 }
 
 // Run watches exact source paths loaded from SQLite and refreshes membership
-// when an explicit import updates NotificationPath. Membership is add-only;
+// when an explicit import updates NotificationPath. Removed sources are
+// unenrolled;
 // unrelated paths in armed directories never reach the callbacks.
 func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	if logger == nil {
