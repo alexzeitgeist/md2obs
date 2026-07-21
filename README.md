@@ -52,7 +52,7 @@ database must not be placed inside the vault.
 ```console
 md2obs FILE...                         # import is the default command
 md2obs import FILE...
-md2obs watch [--daemon] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+md2obs watch [--daemon [--log]] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs list
 md2obs history FILE
 md2obs status
@@ -86,6 +86,7 @@ names are truncated on a UTF-8 boundary and retain the source hash.
 ```console
 md2obs watch                       # sources imported into this vault today
 md2obs watch --daemon              # detach after startup succeeds
+md2obs watch --daemon --log        # append output beside the state database
 md2obs watch --days 3              # today and the previous two days
 md2obs watch --debounce 500ms      # per-source quiet period (default)
 md2obs watch --on-vault-change=preserve
@@ -114,14 +115,15 @@ effectively no CPU. Stop a foreground watcher with Ctrl-C.
 
 `--daemon` runs the same watcher in a detached background session on Linux or
 macOS. The starting command waits until the initial database selection and
-filesystem watches are armed, then prints the daemon PID and log location. A
-configuration, database, or watcher startup error therefore still returns a
-non-zero status to the caller. Standard output and errors from the daemon are
-appended to `<state-database>.watch.log`, with permissions restricted to the
-current user. Stop it by sending `SIGTERM` to the printed PID, for example:
+filesystem watches are armed, then prints the daemon PID. A configuration,
+database, or watcher startup error therefore still returns a non-zero status
+to the caller. Daemon output is discarded by default, so no log file is
+created. Add `--log` to append standard output and errors to
+`<state-database>.watch.log`, with permissions restricted to the current user.
+Stop the daemon by sending `SIGTERM` to the printed PID, for example:
 
 ```console
-$ md2obs watch --daemon --days 3
+$ md2obs watch --daemon --log --days 3
 Started md2obs watch daemon (PID 12345)
 Log: /home/alex/.local/share/md2obs/state.db.watch.log
 $ kill 12345
@@ -129,7 +131,8 @@ $ kill 12345
 
 Starting `--daemon` again creates another independent watcher, just as running
 the foreground command in two terminals would. Keep the PID if you intend to
-stop a specific instance later; it is also recorded at the start of the log.
+stop a specific instance later; with `--log`, it is also recorded at the start
+of the log.
 
 Each source identity is pinned when it is enrolled. If its path is replaced by
 a symlink to another file, the event is rejected and reported rather than

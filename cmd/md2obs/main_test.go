@@ -22,8 +22,9 @@ func TestParseCommand(t *testing.T) {
 	}{
 		{"import", "import", []string{"one.md", "two.md"}, ""},
 		{"import missing file", "import", nil, "usage: md2obs import FILE"},
-		{"watch", "watch", []string{"--daemon", "--days", "3", "--debounce", "750ms", "--on-vault-change=preserve"}, ""},
+		{"watch", "watch", []string{"--daemon", "--log", "--days", "3", "--debounce", "750ms", "--on-vault-change=preserve"}, ""},
 		{"watch positional", "watch", []string{"extra"}, "usage: md2obs watch"},
+		{"watch log without daemon", "watch", []string{"--log"}, "--log requires --daemon"},
 		{"watch invalid days", "watch", []string{"--days", "0"}, "--days must be at least 1"},
 		{"watch invalid debounce", "watch", []string{"--debounce", "0s"}, "--debounce must be positive"},
 		{"watch invalid policy", "watch", []string{"--on-vault-change=bogus"}, "invalid --on-vault-change"},
@@ -51,7 +52,7 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestParseWatchOptions(t *testing.T) {
-	got, err := parseCommand("watch", []string{"--daemon", "--days=3", "--debounce=750ms", "--on-vault-change=preserve"})
+	got, err := parseCommand("watch", []string{"--daemon", "--log", "--days=3", "--debounce=750ms", "--on-vault-change=preserve"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +62,9 @@ func TestParseWatchOptions(t *testing.T) {
 	}
 	if !got.daemon {
 		t.Fatal("--daemon was not recorded")
+	}
+	if !got.log {
+		t.Fatal("--log was not recorded")
 	}
 }
 
@@ -96,7 +100,7 @@ func TestRunCommandHelp(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
 	}
-	for _, want := range []string{"Usage: md2obs watch [OPTIONS]", "--daemon", "--debounce", "--on-vault-change"} {
+	for _, want := range []string{"Usage: md2obs watch [OPTIONS]", "--daemon", "--log", "--debounce", "--on-vault-change"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
@@ -118,7 +122,7 @@ func TestRunWatchDaemonDelegatesAfterValidatingConfig(t *testing.T) {
 	original := launchWatchDaemon
 	t.Cleanup(func() { launchWatchDaemon = original })
 	called := false
-	launchWatchDaemon = func(_ context.Context, executable string, args []string, cfg *config.Config) (daemonProcess, error) {
+	launchWatchDaemon = func(_ context.Context, executable string, args []string, cfg *config.Config, logging bool) (daemonProcess, error) {
 		called = true
 		if executable == "" {
 			t.Fatal("daemon executable was empty")
@@ -129,7 +133,10 @@ func TestRunWatchDaemonDelegatesAfterValidatingConfig(t *testing.T) {
 		if cfg.VaultAbs != vault || cfg.StateDBPath != stateDB {
 			t.Fatalf("daemon config = %+v", cfg)
 		}
-		return daemonProcess{PID: 1234, LogPath: stateDB + ".watch.log"}, nil
+		if logging {
+			t.Fatal("daemon logging was enabled by default")
+		}
+		return daemonProcess{PID: 1234}, nil
 	}
 
 	code, stdout, stderr := captureRun(t, []string{"watch", "--daemon", "--days=2"})
@@ -139,13 +146,46 @@ func TestRunWatchDaemonDelegatesAfterValidatingConfig(t *testing.T) {
 	if !called {
 		t.Fatal("daemon launcher was not called")
 	}
-	for _, want := range []string{"PID 1234", stateDB + ".watch.log"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout does not contain %q: %q", want, stdout)
-		}
+	if !strings.Contains(stdout, "PID 1234") {
+		t.Errorf("stdout does not contain daemon PID: %q", stdout)
+	}
+	if strings.Contains(stdout, "Log:") {
+		t.Errorf("stdout unexpectedly reports a log: %q", stdout)
 	}
 	if _, err := os.Stat(stateDB); !os.IsNotExist(err) {
 		t.Fatalf("parent unexpectedly opened state database: %v", err)
+	}
+}
+
+func TestRunWatchDaemonReportsOptInLog(t *testing.T) {
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateDB := filepath.Join(root, "state", "state.db")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("MD2OBS_VAULT", vault)
+	t.Setenv("MD2OBS_STATE_DB", stateDB)
+	t.Setenv(daemonChildEnv, "")
+
+	original := launchWatchDaemon
+	t.Cleanup(func() { launchWatchDaemon = original })
+	launchWatchDaemon = func(_ context.Context, _ string, _ []string, _ *config.Config, logging bool) (daemonProcess, error) {
+		if !logging {
+			t.Fatal("daemon logging was not enabled")
+		}
+		return daemonProcess{PID: 1234, LogPath: stateDB + ".watch.log"}, nil
+	}
+
+	code, stdout, stderr := captureRun(t, []string{"watch", "--daemon", "--log"})
+	if code != 0 || stderr != "" {
+		t.Fatalf("run = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"PID 1234", "Log: " + stateDB + ".watch.log"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout does not contain %q: %q", want, stdout)
+		}
 	}
 }
 

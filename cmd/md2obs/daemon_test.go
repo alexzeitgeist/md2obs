@@ -47,7 +47,7 @@ func TestDaemonHelperProcess(t *testing.T) {
 	time.Sleep(30 * time.Second)
 }
 
-func TestStartWatchDaemonWaitsForReadyAndRedirectsLogs(t *testing.T) {
+func TestStartWatchDaemonWaitsForReadyWithoutCreatingLogByDefault(t *testing.T) {
 	root := t.TempDir()
 	cfg := &config.Config{
 		VaultAbs:    root,
@@ -64,6 +64,7 @@ func TestStartWatchDaemonWaitsForReadyAndRedirectsLogs(t *testing.T) {
 		executable,
 		[]string{"-test.run=^TestDaemonHelperProcess$"},
 		cfg,
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -81,14 +82,59 @@ func TestStartWatchDaemonWaitsForReadyAndRedirectsLogs(t *testing.T) {
 			_ = daemon.Kill()
 		}
 	})
-	if process.LogPath != daemonLogPath(cfg.StateDBPath) {
-		t.Fatalf("log path = %s", process.LogPath)
+	if process.LogPath != "" {
+		t.Fatalf("log path = %q, want empty", process.LogPath)
 	}
 
 	if err := daemon.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("daemon was not alive after readiness: %v", err)
 	}
 
+	if _, err := os.Stat(daemonLogPath(cfg.StateDBPath)); !os.IsNotExist(err) {
+		t.Fatalf("daemon created a log by default: %v", err)
+	}
+	if err := daemon.Kill(); err != nil {
+		t.Fatalf("stop helper daemon: %v", err)
+	}
+	stopped = true
+}
+
+func TestStartWatchDaemonRedirectsLogsWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		VaultAbs:    root,
+		StateDBPath: filepath.Join(root, "state", "state.db"),
+	}
+	t.Setenv(daemonTestModeEnv, "ready")
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := startWatchDaemon(
+		context.Background(),
+		executable,
+		[]string{"-test.run=^TestDaemonHelperProcess$"},
+		cfg,
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := os.FindProcess(process.PID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = daemon.Kill()
+		}
+	})
+
+	if process.LogPath != daemonLogPath(cfg.StateDBPath) {
+		t.Fatalf("log path = %q", process.LogPath)
+	}
 	log := waitForFileContaining(t, process.LogPath, "working directory: /")
 	if !strings.Contains(log, "daemon helper started") {
 		t.Fatalf("daemon stdout was not redirected to log:\n%s", log)
@@ -113,7 +159,7 @@ func TestStartWatchDaemonHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := startWatchDaemon(ctx, "/does/not/matter", []string{"watch", "--daemon"}, cfg)
+	_, err := startWatchDaemon(ctx, "/does/not/matter", []string{"watch", "--daemon"}, cfg, false)
 	if err == nil || err != context.Canceled {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -139,6 +185,7 @@ func TestStartWatchDaemonReportsEarlyExit(t *testing.T) {
 		executable,
 		[]string{"-test.run=^TestDaemonHelperProcess$"},
 		cfg,
+		true,
 	)
 	if err == nil {
 		t.Fatal("early daemon exit was accepted")
@@ -151,6 +198,39 @@ func TestStartWatchDaemonReportsEarlyExit(t *testing.T) {
 	log := waitForFileContaining(t, daemonLogPath(cfg.StateDBPath), "intentional startup failure")
 	if !strings.Contains(log, "daemon helper started") {
 		t.Fatalf("daemon output missing from log:\n%s", log)
+	}
+}
+
+func TestStartWatchDaemonReportsEarlyExitWithoutLogByDefault(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		VaultAbs:    root,
+		StateDBPath: filepath.Join(root, "state", "state.db"),
+	}
+	t.Setenv(daemonTestModeEnv, "fail")
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = startWatchDaemon(
+		context.Background(),
+		executable,
+		[]string{"-test.run=^TestDaemonHelperProcess$"},
+		cfg,
+		false,
+	)
+	if err == nil {
+		t.Fatal("early daemon exit was accepted")
+	}
+	if !strings.Contains(err.Error(), "exited before becoming ready") {
+		t.Fatalf("unexpected startup error: %v", err)
+	}
+	if strings.Contains(err.Error(), "log:") {
+		t.Fatalf("startup error reports a disabled log: %v", err)
+	}
+	if _, statErr := os.Stat(daemonLogPath(cfg.StateDBPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("failed daemon created a log by default: %v", statErr)
 	}
 }
 

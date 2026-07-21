@@ -33,7 +33,7 @@ var launchWatchDaemon = startWatchDaemon
 // startWatchDaemon re-executes md2obs with the same watch arguments. The
 // readiness pipe is inherited as fd 3; the child acknowledges only after the
 // fsnotify watches and initial membership are armed.
-func startWatchDaemon(ctx context.Context, executable string, args []string, cfg *config.Config) (daemonProcess, error) {
+func startWatchDaemon(ctx context.Context, executable string, args []string, cfg *config.Config, logging bool) (daemonProcess, error) {
 	if err := ctx.Err(); err != nil {
 		return daemonProcess{}, err
 	}
@@ -44,25 +44,29 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 		return daemonProcess{}, err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(cfg.StateDBPath), 0o755); err != nil {
-		return daemonProcess{}, fmt.Errorf("create state directory for daemon: %w", err)
-	}
-
-	logPath := daemonLogPath(cfg.StateDBPath)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		return daemonProcess{}, fmt.Errorf("open daemon log %s: %w", logPath, err)
-	}
-	defer logFile.Close()
-	if err := logFile.Chmod(0o600); err != nil {
-		return daemonProcess{}, fmt.Errorf("secure daemon log %s: %w", logPath, err)
-	}
-
-	devNull, err := os.Open(os.DevNull)
-	if err != nil {
-		return daemonProcess{}, fmt.Errorf("open %s for daemon input: %w", os.DevNull, err)
+		return daemonProcess{}, fmt.Errorf("open %s for daemon input and output: %w", os.DevNull, err)
 	}
 	defer devNull.Close()
+
+	logPath := ""
+	output := devNull
+	if logging {
+		if err := os.MkdirAll(filepath.Dir(cfg.StateDBPath), 0o755); err != nil {
+			return daemonProcess{}, fmt.Errorf("create state directory for daemon log: %w", err)
+		}
+		logPath = daemonLogPath(cfg.StateDBPath)
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return daemonProcess{}, fmt.Errorf("open daemon log %s: %w", logPath, err)
+		}
+		defer logFile.Close()
+		if err := logFile.Chmod(0o600); err != nil {
+			return daemonProcess{}, fmt.Errorf("secure daemon log %s: %w", logPath, err)
+		}
+		output = logFile
+	}
 
 	readyRead, readyWrite, err := os.Pipe()
 	if err != nil {
@@ -72,8 +76,8 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 	defer readyWrite.Close()
 
 	cmd.Stdin = devNull
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = output
+	cmd.Stderr = output
 	cmd.ExtraFiles = []*os.File{readyWrite}
 	if err := cmd.Start(); err != nil {
 		return daemonProcess{}, fmt.Errorf("start watch daemon: %w", err)
@@ -103,7 +107,10 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 			if waitErr == nil {
 				waitErr = errors.New("process exited without reporting an error")
 			}
-			return daemonProcess{}, fmt.Errorf("watch daemon exited before becoming ready: %w (log: %s)", waitErr, logPath)
+			if logPath != "" {
+				return daemonProcess{}, fmt.Errorf("watch daemon exited before becoming ready: %w (log: %s)", waitErr, logPath)
+			}
+			return daemonProcess{}, fmt.Errorf("watch daemon exited before becoming ready: %w", waitErr)
 		}
 		pid := cmd.Process.Pid
 		if err := cmd.Process.Release(); err != nil {
