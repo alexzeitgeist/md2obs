@@ -25,7 +25,7 @@ const usage = `md2obs imports explicitly selected Markdown files into an Obsidia
 Usage:
   md2obs FILE...
   md2obs import FILE...
-  md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+  md2obs watch [--daemon] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs list
   md2obs history FILE
   md2obs status
@@ -37,6 +37,8 @@ Commands:
   watch    Watch sources materialized in this vault today (--days N widens
            the initial window) and enroll later imports while running.
            Re-import watched sources when they change.
+           --daemon starts the watcher in the background and logs beside the
+           state database.
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
            since the last import: skip (default), overwrite, or preserve.
@@ -64,6 +66,7 @@ Watch sources recently imported into the configured vault using native
 filesystem notifications. Successful imports join a running watch session.
 
 Options:
+  --daemon                    Run in the background (Linux and macOS)
   --days N                    Inclusive calendar-day window (default 1)
   --debounce DURATION         Per-source quiet period (default 500ms)
   --on-vault-change POLICY    skip (default), overwrite, or preserve
@@ -112,14 +115,43 @@ func run(args []string) int {
 		return 2
 	}
 
+	var watchReady func()
+	if command == "watch" && options.daemon && isDaemonChild() {
+		var cleanup func()
+		watchReady, cleanup, err = daemonReadySignal()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+			return 1
+		}
+		defer cleanup()
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 1
 	}
+	if command == "watch" && options.daemon && isDaemonChild() {
+		fmt.Fprintf(os.Stdout, "Starting md2obs watch daemon (PID %d)\n", os.Getpid())
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if command == "watch" && options.daemon && !isDaemonChild() {
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: resolve executable for daemon: %v\n", err)
+			return 1
+		}
+		process, err := launchWatchDaemon(ctx, executable, args, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stdout, "Started md2obs watch daemon (PID %d)\nLog: %s\n", process.PID, process.LogPath)
+		return 0
+	}
 
 	db, err := database.Open(ctx, cfg.StateDBPath)
 	if err != nil {
@@ -129,13 +161,14 @@ func run(args []string) int {
 	defer db.Close()
 
 	deps := &app.Deps{
-		DB:     db,
-		Config: cfg,
-		Layout: layout.NewDatedFlatV1(),
-		Now:    time.Now,
-		Out:    os.Stdout,
-		Err:    os.Stderr,
-		Log:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		DB:         db,
+		Config:     cfg,
+		Layout:     layout.NewDatedFlatV1(),
+		Now:        time.Now,
+		Out:        os.Stdout,
+		Err:        os.Stderr,
+		Log:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		WatchReady: watchReady,
 	}
 
 	if err := dispatch(ctx, deps, command, options); err != nil {
@@ -149,6 +182,7 @@ type commandOptions struct {
 	files       []string
 	historyFile string
 	watch       app.WatchOptions
+	daemon      bool
 }
 
 func commandFlagSet(name string) *flag.FlagSet {
@@ -175,6 +209,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 
 	case "watch":
 		fs := commandFlagSet("watch")
+		daemon := fs.Bool("daemon", false, "run the watcher in the background")
 		days := fs.Int("days", 1, "inclusive calendar-day window (1 = today)")
 		debounce := fs.Duration("debounce", app.DefaultDebounce, "per-source quiet period before re-import")
 		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
@@ -182,7 +217,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]")
+			return options, fmt.Errorf("usage: md2obs watch [--daemon] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]")
 		}
 		policy, err := app.ParsePolicy(*policyFlag)
 		if err != nil {
@@ -193,6 +228,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			Debounce:      *debounce,
 			OnVaultChange: policy,
 		}
+		options.daemon = *daemon
 		if err := options.watch.Validate(); err != nil {
 			return options, err
 		}

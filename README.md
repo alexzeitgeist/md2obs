@@ -52,7 +52,7 @@ database must not be placed inside the vault.
 ```console
 md2obs FILE...                         # import is the default command
 md2obs import FILE...
-md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+md2obs watch [--daemon] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs list
 md2obs history FILE
 md2obs status
@@ -85,6 +85,7 @@ names are truncated on a UTF-8 boundary and retain the source hash.
 
 ```console
 md2obs watch                       # sources imported into this vault today
+md2obs watch --daemon              # detach after startup succeeds
 md2obs watch --days 3              # today and the previous two days
 md2obs watch --debounce 500ms      # per-source quiet period (default)
 md2obs watch --on-vault-change=preserve
@@ -109,7 +110,26 @@ after startup gets one silent content check after its directory watch is armed,
 closing the small import-to-watch race; matching content causes no vault write
 and does not evaluate `--on-vault-change`. The watcher never scans directories,
 never imports unrelated files, and does no polling — idle, it consumes
-effectively no CPU. Stop it with Ctrl-C.
+effectively no CPU. Stop a foreground watcher with Ctrl-C.
+
+`--daemon` runs the same watcher in a detached background session on Linux or
+macOS. The starting command waits until the initial database selection and
+filesystem watches are armed, then prints the daemon PID and log location. A
+configuration, database, or watcher startup error therefore still returns a
+non-zero status to the caller. Standard output and errors from the daemon are
+appended to `<state-database>.watch.log`, with permissions restricted to the
+current user. Stop it by sending `SIGTERM` to the printed PID, for example:
+
+```console
+$ md2obs watch --daemon --days 3
+Started md2obs watch daemon (PID 12345)
+Log: /home/alex/.local/share/md2obs/state.db.watch.log
+$ kill 12345
+```
+
+Starting `--daemon` again creates another independent watcher, just as running
+the foreground command in two terminals would. Keep the PID if you intend to
+stop a specific instance later; it is also recorded at the start of the log.
 
 Each source identity is pinned when it is enrolled. If its path is replaced by
 a symlink to another file, the event is rejected and reported rather than
@@ -189,7 +209,8 @@ For anything you want to keep, duplicate the note into a normal folder
 2. `md2obs import` a Markdown file from outside the vault.
 3. Confirm it appears under `_External/<today>/` and Obsidian indexes it.
 4. Confirm Sync uploads it and it appears on the phone.
-5. Modify the source while `md2obs watch` runs; confirm the same-day vault
+5. Modify the source while `md2obs watch` runs (in the foreground or with
+   `--daemon`); confirm the same-day vault
    file updates (and syncs).
 6. Create another Markdown file in the same source directory; confirm it is
    *not* imported.
