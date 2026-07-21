@@ -14,6 +14,14 @@ type Source struct {
 	DisplayPath   string
 }
 
+// TrackingEntry describes one source's automatic watch/refresh eligibility
+// in a vault together with its newest materialized snapshot there.
+type TrackingEntry struct {
+	Source
+	SnapshotDate string
+	Active       bool
+}
+
 // UpsertSource registers a source or refreshes its display path and
 // last-seen timestamp, returning the source id either way.
 func UpsertSource(ctx context.Context, q Querier, canonicalPath, displayPath, nowUTC string) (int64, error) {
@@ -72,6 +80,10 @@ type ListEntry struct {
 	DisplayPath  string
 	SnapshotDate string
 	RelativePath sql.NullString
+	// TrackingActive is null when this source has never been materialized in
+	// the configured vault. A missing watch_tracking row means active for
+	// sources imported before explicit tracking state was introduced.
+	TrackingActive sql.NullBool
 	// Current compares database intent with the last recorded write; it does
 	// not describe a live filesystem check.
 	Current bool
@@ -85,6 +97,18 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 		    s.display_path,
 		    sn.snapshot_date,
 		    m.relative_path,
+		    CASE WHEN EXISTS (
+		        SELECT 1
+		        FROM snapshots AS tracked_sn
+		        JOIN materializations AS tracked_m
+		            ON tracked_m.snapshot_id = tracked_sn.snapshot_id
+		        WHERE tracked_sn.source_id = s.source_id
+		          AND tracked_m.vault_id = ?
+		    ) THEN COALESCE((
+		        SELECT wt.active
+		        FROM watch_tracking AS wt
+		        WHERE wt.source_id = s.source_id AND wt.vault_id = ?
+		    ), 1) END,
 		    COALESCE(m.written_revision_id = sn.revision_id, 0)
 		FROM sources AS s
 		JOIN snapshots AS sn
@@ -95,7 +119,7 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 		        LIMIT 1)
 		LEFT JOIN materializations AS m
 		    ON m.snapshot_id = sn.snapshot_id AND m.vault_id = ?
-		ORDER BY s.display_path`, vaultID)
+		ORDER BY s.display_path`, vaultID, vaultID, vaultID)
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
@@ -104,7 +128,7 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 	var entries []ListEntry
 	for rows.Next() {
 		var e ListEntry
-		if err := rows.Scan(&e.DisplayPath, &e.SnapshotDate, &e.RelativePath, &e.Current); err != nil {
+		if err := rows.Scan(&e.DisplayPath, &e.SnapshotDate, &e.RelativePath, &e.TrackingActive, &e.Current); err != nil {
 			return nil, fmt.Errorf("scan list row: %w", err)
 		}
 		entries = append(entries, e)
@@ -121,8 +145,8 @@ type WatchCandidate struct {
 }
 
 // SetWatchActive records whether a source remains eligible for automatic
-// watching in a vault. Explicit imports reactivate a source; observed
-// deletion deactivates it until the user imports it again.
+// watching and refresh in a vault. Explicit imports reactivate a source;
+// explicit untracking deactivates it without deleting any journal history.
 func SetWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64, active bool, nowUTC string) error {
 	value := 0
 	if active {
@@ -134,6 +158,78 @@ func SetWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64, act
 		return fmt.Errorf("set watch tracking for source %d: %w", sourceID, err)
 	}
 	return nil
+}
+
+// IsWatchActive reports the vault-scoped automatic-tracking state. Sources
+// without an explicit row predate watch_tracking and remain active by default.
+func IsWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64) (bool, error) {
+	var active bool
+	err := q.QueryRowContext(ctx, `SELECT COALESCE((
+		SELECT active FROM watch_tracking WHERE source_id = ? AND vault_id = ?
+	), 1)`, sourceID, vaultID).Scan(&active)
+	if err != nil {
+		return false, fmt.Errorf("get watch tracking for source %d: %w", sourceID, err)
+	}
+	return active, nil
+}
+
+// ListTrackingEntries returns every source ever materialized in vaultKey with
+// its current automatic-tracking state and newest materialized snapshot date.
+func ListTrackingEntries(ctx context.Context, q Querier, vaultKey string) ([]TrackingEntry, error) {
+	return selectTrackingEntries(ctx, q, vaultKey, "", "")
+}
+
+// FindTrackingEntriesByPath returns sources materialized in vaultKey whose
+// canonical identity matches canonicalPath or whose last display path matches
+// displayPath. Multiple rows are possible when a reused symlink display path
+// has referred to more than one canonical source over time.
+func FindTrackingEntriesByPath(ctx context.Context, q Querier, vaultKey, canonicalPath, displayPath string) ([]TrackingEntry, error) {
+	return selectTrackingEntries(ctx, q, vaultKey, canonicalPath, displayPath)
+}
+
+func selectTrackingEntries(ctx context.Context, q Querier, vaultKey, canonicalPath, displayPath string) ([]TrackingEntry, error) {
+	pathFilter := ""
+	args := []any{vaultKey}
+	if canonicalPath != "" || displayPath != "" {
+		pathFilter = " AND (s.canonical_path = ? OR s.display_path = ?)"
+		args = append(args, canonicalPath, displayPath)
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT
+		    s.source_id,
+		    s.canonical_path,
+		    s.display_path,
+		    MAX(sn.snapshot_date),
+		    COALESCE(wt.active, 1)
+		FROM sources AS s
+		JOIN snapshots AS sn ON sn.source_id = s.source_id
+		JOIN materializations AS m ON m.snapshot_id = sn.snapshot_id
+		JOIN vaults AS v ON v.vault_id = m.vault_id
+		LEFT JOIN watch_tracking AS wt
+		    ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
+		WHERE v.vault_key = ?`+pathFilter+`
+		GROUP BY s.source_id, s.canonical_path, s.display_path, wt.active
+		ORDER BY s.canonical_path`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("select tracking entries for vault %s: %w", vaultKey, err)
+	}
+	defer rows.Close()
+
+	var entries []TrackingEntry
+	for rows.Next() {
+		var entry TrackingEntry
+		if err := rows.Scan(
+			&entry.ID,
+			&entry.CanonicalPath,
+			&entry.DisplayPath,
+			&entry.SnapshotDate,
+			&entry.Active,
+		); err != nil {
+			return nil, fmt.Errorf("scan tracking entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
 }
 
 // SelectWatchCandidates returns sources whose newest snapshot inside the

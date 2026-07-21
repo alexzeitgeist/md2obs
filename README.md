@@ -55,6 +55,8 @@ md2obs FILE...                         # import is the default command
 md2obs import FILE...
 md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+md2obs untrack FILE...
+md2obs untrack [--missing] [--older-than AGE] [--dry-run]
 md2obs list
 md2obs history FILE
 md2obs status
@@ -139,11 +141,11 @@ same state database are not watched or materialized here.
 Successful explicit imports into this vault automatically join an already
 running watcher, including imports from directories it was not previously
 watching. A watcher started with no eligible sources stays running and waits
-for imports. Membership grows for the life of the foreground session; it is
-not reduced as the date window advances. A new invocation recalculates the
-window. The discovery range expands across midnight so an import immediately
-before midnight is not missed when its notification arrives just after
-midnight.
+for imports. Membership grows with successful imports and is not reduced merely
+because the date window advances; an explicit `untrack` removes a source from
+the live session. A new invocation recalculates the window. The discovery range
+expands across midnight so an import immediately before midnight is not missed
+when its notification arrives just after midnight.
 
 Startup is passive and never rewrites existing vault copies. A source enrolled
 after startup gets one silent content check after its directory watch is armed,
@@ -163,6 +165,11 @@ Each source identity is pinned when it is enrolled. If its path is replaced by
 a symlink to another file, the event is rejected and reported rather than
 registering or importing the new target.
 
+Deleting a source does not implicitly untrack it. The watcher keeps the exact
+registered path so temporary removals, atomic replacements, branch changes,
+and later recreation can recover without losing the user's explicit source
+selection. Use `md2obs untrack` when tracking should stop.
+
 `--on-vault-change` decides what happens when the vault copy was edited
 (for example on a phone, synced back) since md2obs last wrote it:
 
@@ -177,15 +184,58 @@ before each overwrite — the vault itself is never watched, so an Obsidian
 edit alone produces no output; it is detected when the source next produces a
 relevant filesystem event.
 
+### untrack
+
+```console
+md2obs untrack ~/projects/a/README.md
+md2obs untrack --missing
+md2obs untrack --older-than 90d
+md2obs untrack --missing --older-than 30d
+md2obs untrack --missing --dry-run
+```
+
+`untrack` explicitly stops automatic watch and refresh for sources in the
+configured vault. It changes only vault-scoped tracking state: source history,
+dated snapshots, and existing vault files are preserved. Importing the source
+again reactivates it in that vault.
+
+Named paths may be untracked whether they still exist or not. A path shown by
+`md2obs list` can be passed back to `untrack`, including a missing source that
+was originally imported through a symlink. Named and batch selection cannot be
+combined in one invocation.
+
+`--missing` selects an exact source only when that path is absent and its
+immediate parent can be read. If the parent is missing or inaccessible, the
+source is reported as unavailable and remains tracked; this avoids interpreting
+an unmounted volume or permissions problem as deletion. `--dry-run` reports the
+same decisions without changing tracking state.
+
+`--older-than AGE` selects sources whose newest materialized snapshot in this
+vault is older than the given number of local calendar days. Ages use whole-day
+syntax such as `30d` or `365d`; source and vault filesystem modification times
+are not consulted. When `--missing` and `--older-than` are combined, both
+conditions must match. Untracking by age is operational pruning, not history or
+database cleanup.
+
+An untrack operation notifies a running foreground watcher, which removes the
+source from its live membership. If notification fails, the database change is
+kept and a warning asks for a watcher restart.
+
+When upgrading a schema-v2 database, md2obs reactivates inactive tracking rows
+once because that version could create them only from automatic live-deletion
+inference. In schema v3 and later, inactive rows represent explicit `untrack`
+operations and persist across restarts.
+
 ### list / history / status
 
-`list` shows each source with its latest snapshot. `content: stale` means that
-the snapshot references a different revision from the last revision md2obs
-recorded writing at that path, for example after a skipped conflict. It is a
-database-state label, not the result of inspecting the current vault file.
-`history FILE` shows all dated snapshots for one source. `status` shows
-configuration, database location, schema version, and counts. All three are
-database queries only.
+`list` shows each source with its vault-scoped tracking state and latest
+snapshot. `tracking: inactive` means automatic watch and refresh were explicitly
+disabled; it does not mean history was deleted. `content: stale` means that the
+snapshot references a different revision from the last revision md2obs recorded
+writing at that path, for example after a skipped conflict. It is a database-state
+label, not the result of inspecting the current vault file. `history FILE` shows
+all dated snapshots for one source. `status` shows configuration, database
+location, schema version, and counts. All three are database queries only.
 
 ## Path safety
 
@@ -250,8 +300,14 @@ For anything you want to keep, duplicate the note into a normal folder
 - **`vault … does not exist`** — `vault_path` must point at an existing
   directory (the vault root, not a subfolder).
 - **Watcher logs `cannot watch source directory`** — the source's directory is
-  gone or inaccessible. Restore it and re-import the source to retry dynamic
-  enrollment, or restart the watcher.
+  gone or inaccessible. Restore it and restart the watcher, or explicitly
+  import the source to trigger a live membership retry.
+- **A source was deleted but still appears as tracked** — absence does not
+  revoke explicit source selection. Restore the source to resume automatic
+  imports, or run `md2obs untrack FILE` to stop tracking it.
+- **`untrack --missing` reports a source as unavailable** — its parent could
+  not be read, so md2obs kept it tracked. Restore the mount or permissions and
+  retry, or explicitly name the source with `md2obs untrack FILE`.
 - **Watcher logs `source identity changed`** — the registered path now resolves
   through a symlink to a different file. Restore the original path or import
   the new target explicitly.
@@ -259,9 +315,9 @@ For anything you want to keep, duplicate the note into a normal folder
   existing terminal with Ctrl-C before starting another for the same database
   and vault. After upgrading from a version with the background daemon, kill
   any leftover daemon process from the previous version.
-- **`notification queue overflowed`** — source changes or new enrollments may
-  have been lost; run `md2obs refresh --all`, or re-run `md2obs import` on the
-  affected files if they are known.
+- **`notification queue overflowed`** — source changes or membership updates
+  may have been lost; restart the watcher, run `md2obs refresh --all`, or re-run
+  the affected `import`/`untrack` command.
 - **Import warns that running watchers may need to be restarted** — the import
   itself committed, but its cross-process watcher notification failed. Stop and
   run `md2obs watch` again, or fix the reported state-directory error and
@@ -291,7 +347,9 @@ SQLite records operational registry and materialization metadata
 (source → revision → snapshot → materialization), while the original file
 remains the content source of truth. Vault paths are derived, replaceable
 materialization details, and the watcher reacts only to exact registered source
-identities.
+identities. Source enrollment is explicit: import activates automatic tracking,
+untrack deactivates it, and filesystem absence alone changes neither history nor
+tracking intent.
 
 The physical replacement occurs inside the SQLite transaction, so a failed
 physical write rolls back database changes. SQLite and the filesystem cannot

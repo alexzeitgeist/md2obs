@@ -25,7 +25,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("first open: %v", err)
 	}
 	v, err := db.SchemaVersion(ctx)
-	if err != nil || v != 2 {
+	if err != nil || v != 3 {
 		t.Fatalf("schema version = %d, err %v", v, err)
 	}
 	db.Close()
@@ -35,8 +35,54 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer db.Close()
-	if v, err = db.SchemaVersion(ctx); err != nil || v != 2 {
+	if v, err = db.SchemaVersion(ctx); err != nil || v != 3 {
 		t.Fatalf("schema version after reopen = %d, err %v", v, err)
+	}
+}
+
+func TestMigrationReactivatesOnlyLegacyImplicitUntracking(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := db.Query()
+	vaultID, _ := EnsureVault(ctx, q, "/vault", "vault", "/vault", "t")
+	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/src/note.md", "t")
+	if err := SetWatchActive(ctx, q, sourceID, vaultID, false, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE metadata SET value = '2' WHERE key = ?`, schemaVersionKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := IsWatchActive(ctx, db.Query(), sourceID, vaultID)
+	if err != nil || !active {
+		t.Fatalf("legacy inactive row was not reactivated: active %v, err %v", active, err)
+	}
+	if err := SetWatchActive(ctx, db.Query(), sourceID, vaultID, false, "explicit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	active, err = IsWatchActive(ctx, db.Query(), sourceID, vaultID)
+	if err != nil || active {
+		t.Fatalf("schema-v3 explicit inactive row did not persist: active %v, err %v", active, err)
 	}
 }
 
@@ -332,5 +378,51 @@ func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T
 	}
 	if got, err := SelectAllWatchCandidates(ctx, q, "/vault-a"); err != nil || len(got) != 2 {
 		t.Fatalf("reactivated all-candidates = %+v, err %v", got, err)
+	}
+}
+
+func TestTrackingEntriesAndListStateAreVaultScoped(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	q := db.Query()
+
+	vaultA, _ := EnsureVault(ctx, q, "/vault-a", "a", "/vault-a", "t")
+	vaultB, _ := EnsureVault(ctx, q, "/vault-b", "b", "/vault-b", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
+	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/display/note.md", "t")
+	revisionID, _ := FindOrCreateRevision(ctx, q, sourceID, "sha", 1, 1, "t")
+	snapshotID, _ := CreateSnapshot(ctx, q, sourceID, revisionID, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultA, layoutID, "_External/a.md", revisionID, "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultB, layoutID, "_External/b.md", revisionID, "t")
+
+	entries, err := ListTrackingEntries(ctx, q, "/vault-a")
+	if err != nil || len(entries) != 1 || !entries[0].Active || entries[0].SnapshotDate != "2026-07-20" {
+		t.Fatalf("default tracking entries = %+v, err %v", entries, err)
+	}
+	if err := SetWatchActive(ctx, q, sourceID, vaultA, false, "later"); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := IsWatchActive(ctx, q, sourceID, vaultA); err != nil || active {
+		t.Fatalf("vault-a active = %v, err %v", active, err)
+	}
+	if active, err := IsWatchActive(ctx, q, sourceID, vaultB); err != nil || !active {
+		t.Fatalf("default vault-b active = %v, err %v", active, err)
+	}
+	entries, err = FindTrackingEntriesByPath(ctx, q, "/vault-a", "/unmatched", "/display/note.md")
+	if err != nil || len(entries) != 1 || entries[0].Active {
+		t.Fatalf("inactive display-path lookup = %+v, err %v", entries, err)
+	}
+	entries, err = ListTrackingEntries(ctx, q, "/vault-b")
+	if err != nil || len(entries) != 1 || !entries[0].Active {
+		t.Fatalf("vault-b tracking changed with vault-a = %+v, err %v", entries, err)
+	}
+
+	listed, err := ListSources(ctx, q, vaultA)
+	if err != nil || len(listed) != 1 || !listed[0].TrackingActive.Valid || listed[0].TrackingActive.Bool {
+		t.Fatalf("listed inactive tracking = %+v, err %v", listed, err)
+	}
+	listed, err = ListSources(ctx, q, 0)
+	if err != nil || len(listed) != 1 || listed[0].TrackingActive.Valid {
+		t.Fatalf("listed unmaterialized tracking = %+v, err %v", listed, err)
 	}
 }

@@ -24,6 +24,14 @@ func RunList(ctx context.Context, d *Deps) error {
 	}
 	for _, e := range entries {
 		fmt.Fprintf(d.Out, "%s\n", e.DisplayPath)
+		tracking := "not tracked in current vault"
+		if e.TrackingActive.Valid {
+			tracking = "inactive"
+			if e.TrackingActive.Bool {
+				tracking = "active"
+			}
+		}
+		fmt.Fprintf(d.Out, "  tracking:      %s\n", tracking)
 		fmt.Fprintf(d.Out, "  last snapshot: %s\n", e.SnapshotDate)
 		if e.RelativePath.Valid {
 			fmt.Fprintf(d.Out, "  vault path:    %s\n", e.RelativePath.String)

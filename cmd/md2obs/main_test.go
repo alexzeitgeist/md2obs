@@ -36,6 +36,14 @@ func TestParseCommand(t *testing.T) {
 		{"watch invalid days", "watch", []string{"--days", "0"}, "--days must be at least 1"},
 		{"watch invalid debounce", "watch", []string{"--debounce", "0s"}, "--debounce must be positive"},
 		{"watch invalid policy", "watch", []string{"--on-vault-change=bogus"}, "invalid --on-vault-change"},
+		{"untrack files", "untrack", []string{"one.md", "two.md"}, ""},
+		{"untrack missing", "untrack", []string{"--missing"}, ""},
+		{"untrack old", "untrack", []string{"--older-than=90d"}, ""},
+		{"untrack combined dry run", "untrack", []string{"--missing", "--older-than", "30d", "--dry-run"}, ""},
+		{"untrack missing selector", "untrack", nil, "usage: md2obs untrack"},
+		{"untrack ambiguous selection", "untrack", []string{"--missing", "one.md"}, "source paths cannot be combined"},
+		{"untrack invalid age unit", "untrack", []string{"--older-than=24h"}, "invalid --older-than"},
+		{"untrack invalid zero age", "untrack", []string{"--older-than=0d"}, "invalid --older-than"},
 		{"list", "list", nil, ""},
 		{"list positional", "list", []string{"extra"}, "usage: md2obs list"},
 		{"history", "history", []string{"note.md"}, ""},
@@ -87,6 +95,24 @@ func TestParseWatchOptions(t *testing.T) {
 	want := app.WatchOptions{Days: 3, Debounce: 750 * time.Millisecond, OnVaultChange: app.PolicyPreserve}
 	if got.watch != want {
 		t.Fatalf("watch options = %+v, want %+v", got.watch, want)
+	}
+}
+
+func TestParseUntrackOptions(t *testing.T) {
+	got, err := parseCommand("untrack", []string{"--missing", "--older-than=45d", "--dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.untrack.Missing || got.untrack.OlderThanDays != 45 || !got.untrack.DryRun || len(got.untrack.Files) != 0 {
+		t.Fatalf("untrack batch options = %+v", got.untrack)
+	}
+
+	named, err := parseCommand("untrack", []string{"one.md", "two.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(named.untrack.Files, ",") != "one.md,two.md" || named.untrack.Missing || named.untrack.OlderThanDays != 0 {
+		t.Fatalf("untrack named options = %+v", named.untrack)
 	}
 }
 
@@ -171,6 +197,22 @@ func TestRunRefreshHelp(t *testing.T) {
 	}
 }
 
+func TestRunUntrackHelp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	code, stdout, stderr := captureRun(t, []string{"untrack", "-h"})
+	if code != 0 || stderr != "" {
+		t.Fatalf("untrack help = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"md2obs untrack", "--missing", "--older-than", "--dry-run", "reactivates"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestRunStatusReportsDatabaseStateOnly(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
@@ -232,6 +274,33 @@ func TestRunDefaultsToImport(t *testing.T) {
 	}
 	if len(vaultFiles) != 2 {
 		t.Fatalf("vault files = %v, want two imported Markdown files", vaultFiles)
+	}
+}
+
+func TestRunUntrackCommandUpdatesListState(t *testing.T) {
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "tracked.md")
+	if err := os.WriteFile(source, []byte("# tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("MD2OBS_VAULT", vault)
+	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
+
+	if code, _, stderr := captureRun(t, []string{source}); code != 0 {
+		t.Fatalf("import = %d, stderr = %q", code, stderr)
+	}
+	code, stdout, stderr := captureRun(t, []string{"untrack", source})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "untracked: "+source) {
+		t.Fatalf("untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	code, stdout, stderr = captureRun(t, []string{"list"})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "tracking:      inactive") {
+		t.Fatalf("list after untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 }
 

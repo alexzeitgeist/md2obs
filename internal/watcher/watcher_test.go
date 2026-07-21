@@ -69,6 +69,13 @@ func TestIndexDynamicAdditionIsIdempotent(t *testing.T) {
 	if _, ok := ix.Match("/home/alex/project-a/unrelated.md"); ok {
 		t.Error("dynamic parent caused unrelated path to match")
 	}
+	if !ix.Remove("/home/alex/project-a/two.md") {
+		t.Fatal("existing source was not removed")
+	}
+	wantPaths := []string{"/home/alex/project-a/one.md", "/home/alex/project-b/three.md"}
+	if got := ix.Paths(); !reflect.DeepEqual(got, wantPaths) {
+		t.Fatalf("Paths after removal = %v, want %v", got, wantPaths)
+	}
 }
 
 func TestDebouncerCoalescesBursts(t *testing.T) {
@@ -135,6 +142,18 @@ func TestDebouncerStopCancelsPending(t *testing.T) {
 	case p := <-d.C:
 		t.Errorf("fired %q after Stop", p)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestDebouncerCancelPath(t *testing.T) {
+	d := NewDebouncer(25 * time.Millisecond)
+	defer d.Stop()
+	d.Trigger("/a/x.md")
+	d.Cancel("/a/x.md")
+	select {
+	case path := <-d.C:
+		t.Fatalf("cancelled path fired: %s", path)
+	case <-time.After(75 * time.Millisecond):
 	}
 }
 
@@ -237,8 +256,72 @@ func TestRunDynamicallyEnrollsNewSource(t *testing.T) {
 	}
 }
 
+func TestRunRefreshRemovesUntrackedSourceAndCancelsPendingEvent(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	sourcePath := filepath.Join(t.TempDir(), "source.md")
+	if err := os.WriteFile(sourcePath, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var include atomic.Bool
+	include.Store(true)
+	ready := make(chan Stats, 1)
+	removed := make(chan string, 1)
+	handled := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   200 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load: func() ([]string, error) {
+				if include.Load() {
+					return []string{sourcePath}, nil
+				}
+				return nil, nil
+			},
+			Handle: func(path string) { handled <- path },
+			Remove: func(path string) { removed <- path },
+			Ready:  func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	defer cancel()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+
+	if err := os.WriteFile(sourcePath, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	include.Store(false)
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-removed:
+		if path != sourcePath {
+			t.Fatalf("removed %q, want %q", path, sourcePath)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("source was not removed during membership refresh")
+	}
+	select {
+	case path := <-handled:
+		t.Fatalf("pending event handled after explicit removal: %s", path)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
-	t.Skip("deleted sources are durably unenrolled")
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state.db")
 	sourceParent := filepath.Join(t.TempDir(), "project")

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -85,8 +86,8 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 	}
 
 	handle := func(p string) {
-		// A fired debounce for a missing file means the source was removed;
-		// Unenroll persists that decision and recreation requires explicit import.
+		// Absence is a source condition, not an implicit untrack request. Keeping
+		// the exact path enrolled lets temporary removals and recreations recover.
 		if _, err := os.Stat(p); err != nil {
 			if !os.IsNotExist(err) {
 				d.logger().Error("cannot inspect watched source", "source", p, "err", err)
@@ -99,6 +100,9 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			return
 		}
 		res, err := ImportWatchedSource(ctx, d, candidate.Source, opts.OnVaultChange)
+		if errors.Is(err, errSourceUntracked) {
+			return
+		}
 		if err != nil {
 			d.logger().Error("watch import failed", "source", p, "err", err)
 			return
@@ -130,21 +134,8 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		Load:             load,
 		Activate:         activate,
 		Handle:           handle,
-		Unenroll: func(p string) {
-			candidate, ok := selected[p]
-			if !ok {
-				return
-			}
-			vaultID, err := database.GetVaultIDByKey(ctx, d.DB.Query(), d.Config.VaultAbs)
-			if err != nil {
-				d.logger().Error("cannot resolve vault for source deletion", "source", p, "err", err)
-			} else if vaultID == 0 {
-				d.logger().Error("cannot persist source deletion: vault is not registered", "source", p)
-			} else if err := database.SetWatchActive(ctx, d.DB.Query(), candidate.ID, vaultID, false, utc(d.Now())); err != nil {
-				d.logger().Error("cannot persist source deletion", "source", p, "err", err)
-			}
+		Remove: func(p string) {
 			delete(selected, p)
-			fmt.Fprintf(d.Out, "no longer watching %s; run md2obs import %s to resume\n", candidate.DisplayPath, candidate.CanonicalPath)
 		},
 		Ready: func(stats watcher.Stats) {
 			fmt.Fprintf(d.Out, "Watching %d imported sources from %d directories\n", stats.Sources, stats.Directories)

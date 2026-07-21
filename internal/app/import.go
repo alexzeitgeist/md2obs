@@ -36,6 +36,8 @@ const (
 	PolicyPreserve Policy = "preserve"
 )
 
+var errSourceUntracked = errors.New("source is no longer tracked")
+
 // ParsePolicy validates an --on-vault-change value.
 func ParsePolicy(s string) (Policy, error) {
 	switch Policy(s) {
@@ -92,7 +94,8 @@ func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Resul
 
 // ImportWatchedSource imports a source selected from SQLite at watcher
 // startup. Re-resolving the event path must produce the same canonical
-// identity; the watcher is never allowed to register a different source.
+// identity; the watcher is never allowed to register a different source or
+// reactivate one that an explicit untrack disabled concurrently.
 func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Source, policy Policy) (Result, error) {
 	return importFile(ctx, d, registered.CanonicalPath, policy, &registered)
 }
@@ -155,8 +158,18 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	if err != nil {
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
-	if err := database.SetWatchActive(ctx, tx, srcID, vaultID, true, nowUTC); err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", display, err)
+	if registered == nil {
+		if err := database.SetWatchActive(ctx, tx, srcID, vaultID, true, nowUTC); err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+	} else {
+		active, err := database.IsWatchActive(ctx, tx, srcID, vaultID)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		if !active {
+			return Result{}, errSourceUntracked
+		}
 	}
 	layoutJSON, _ := json.Marshal(map[string]string{"root_directory": d.Config.RootDirectory})
 	layoutID, err := database.EnsureLayout(ctx, tx, d.Layout.Name(), d.Layout.Version(), string(layoutJSON), nowUTC)

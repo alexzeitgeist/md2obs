@@ -54,6 +54,9 @@ func reconcileWatchCandidate(
 	}
 
 	res, err := ImportWatchedSource(ctx, d, candidate.Source, policy)
+	if errors.Is(err, errSourceUntracked) {
+		return candidateReconcileResult{}, nil
+	}
 	if err != nil {
 		return candidateReconcileResult{}, err
 	}

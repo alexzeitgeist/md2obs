@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +29,8 @@ Usage:
   md2obs import FILE...
   md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+  md2obs untrack FILE...
+  md2obs untrack [--missing] [--older-than AGE] [--dry-run]
   md2obs list
   md2obs history FILE
   md2obs status
@@ -45,6 +49,9 @@ Commands:
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
            since the last import: skip (default), overwrite, or preserve.
+  untrack  Stop automatically watching and refreshing named sources, or select
+           a batch by definite absence and/or materialization age. Existing
+           snapshots and vault files are preserved; import reactivates.
   list     List known sources and their most recent snapshot.
   history  Show dated snapshots for one source.
   status   Show configuration, database location, schema version, and counts.
@@ -86,6 +93,24 @@ Options:
   --debounce DURATION         Per-source quiet period (default 500ms)
   --on-vault-change POLICY    skip (default), overwrite, or preserve
 `,
+	"untrack": `Usage:
+  md2obs untrack [--dry-run] FILE...
+  md2obs untrack --missing [--older-than AGE] [--dry-run]
+  md2obs untrack --older-than AGE [--dry-run]
+
+Stop automatically watching and refreshing selected sources in the configured
+vault. Existing snapshots and vault files are preserved. An explicit import
+reactivates a source.
+
+Batch selectors are combined: --missing --older-than 30d selects sources that
+are both definitely absent and older than 30 local calendar days.
+
+Options:
+  --missing           Exact source absent while its parent is accessible
+  --older-than AGE    Newest materialized snapshot is older than AGE (for
+                      example 30d or 365d)
+  --dry-run           Report what would be untracked without changing state
+`,
 	"list": `Usage: md2obs list
 
 List known sources and their most recent snapshots.
@@ -115,7 +140,7 @@ func run(args []string) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
-	case "import", "refresh", "watch", "list", "history", "status":
+	case "import", "refresh", "watch", "untrack", "list", "history", "status":
 	default:
 		command = "import"
 		commandArgs = args
@@ -176,6 +201,7 @@ type commandOptions struct {
 	historyFile string
 	refresh     app.RefreshOptions
 	watch       app.WatchOptions
+	untrack     app.UntrackOptions
 }
 
 func commandFlagSet(name string) *flag.FlagSet {
@@ -263,6 +289,33 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		}
 		return options, nil
 
+	case "untrack":
+		fs := commandFlagSet("untrack")
+		missing := fs.Bool("missing", false, "sources whose exact path is absent while its parent is accessible")
+		olderThan := fs.String("older-than", "", "sources whose newest materialized snapshot is older than AGE")
+		dryRun := fs.Bool("dry-run", false, "report without changing tracking state")
+		if err := fs.Parse(args); err != nil {
+			return options, err
+		}
+		olderThanDays := 0
+		if *olderThan != "" {
+			var err error
+			olderThanDays, err = parseAgeDays(*olderThan)
+			if err != nil {
+				return options, err
+			}
+		}
+		options.untrack = app.UntrackOptions{
+			Files:         fs.Args(),
+			Missing:       *missing,
+			OlderThanDays: olderThanDays,
+			DryRun:        *dryRun,
+		}
+		if err := options.untrack.Validate(); err != nil {
+			return options, err
+		}
+		return options, nil
+
 	case "list":
 		fs := commandFlagSet("list")
 		if err := fs.Parse(args); err != nil {
@@ -297,6 +350,17 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 	return options, fmt.Errorf("unhandled command %q", command)
 }
 
+func parseAgeDays(value string) (int, error) {
+	if !strings.HasSuffix(value, "d") || len(value) == 1 {
+		return 0, fmt.Errorf("invalid --older-than value %q (want a positive whole-day age such as 30d)", value)
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
+	if err != nil || days <= 0 {
+		return 0, fmt.Errorf("invalid --older-than value %q (want a positive whole-day age such as 30d)", value)
+	}
+	return days, nil
+}
+
 func dispatch(ctx context.Context, deps *app.Deps, command string, options commandOptions) error {
 	switch command {
 	case "import":
@@ -305,6 +369,8 @@ func dispatch(ctx context.Context, deps *app.Deps, command string, options comma
 		return app.RunRefresh(ctx, deps, options.refresh)
 	case "watch":
 		return app.RunWatch(ctx, deps, options.watch)
+	case "untrack":
+		return app.RunUntrack(ctx, deps, options.untrack)
 	case "list":
 		return app.RunList(ctx, deps)
 	case "history":

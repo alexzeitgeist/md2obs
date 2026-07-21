@@ -47,7 +47,7 @@ func (ix *Index) Add(path string) bool {
 	return true
 }
 
-// Remove stops matching a source for the remainder of the watch session.
+// Remove stops matching a source until a later membership refresh adds it.
 func (ix *Index) Remove(path string) bool {
 	clean := filepath.Clean(path)
 	if _, ok := ix.sources[clean]; !ok {
@@ -55,6 +55,16 @@ func (ix *Index) Remove(path string) bool {
 	}
 	delete(ix.sources, clean)
 	return true
+}
+
+// Paths returns the currently selected exact source paths in sorted order.
+func (ix *Index) Paths() []string {
+	paths := make([]string, 0, len(ix.sources))
+	for path := range ix.sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // Match reports whether an event path is one of the selected sources,

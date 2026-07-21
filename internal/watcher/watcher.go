@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// DefaultRefreshDebounce coalesces bursts of explicit-import notifications.
-// It is independent of the source quiet period exposed by --debounce.
+// DefaultRefreshDebounce coalesces bursts of import and untrack membership
+// notifications. It is independent of the source quiet period exposed by
+// --debounce.
 const DefaultRefreshDebounce = 50 * time.Millisecond
 
 // Stats describes the exact sources and source directories armed at startup.
@@ -23,7 +23,7 @@ type Stats struct {
 	Directories int
 }
 
-// Options configures one dynamically growing watch session. All callbacks,
+// Options configures one dynamically reconciled watch session. All callbacks,
 // index mutations, and watched imports run serially on the event-loop
 // goroutine. Timer goroutines only deliver paths on channels.
 type Options struct {
@@ -33,13 +33,14 @@ type Options struct {
 	Load             func() ([]string, error)
 	Activate         func(path string)
 	Handle           func(path string)
-	Unenroll         func(path string)
+	Remove           func(path string)
 	Ready            func(Stats)
 }
 
-// Run watches exact source paths loaded from SQLite and refreshes membership
-// when an explicit import updates NotificationPath. Removed sources are
-// unenrolled, while unrelated paths in armed directories never reach callbacks.
+// Run watches exact source paths loaded from SQLite and reconciles membership
+// when an explicit import or untrack updates NotificationPath. Filesystem
+// absence does not change durable membership; unrelated paths in armed
+// directories never reach callbacks.
 func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -71,13 +72,15 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 
 	ix := NewIndex(nil)
 
-	enroll := func(paths []string, activate bool) {
+	reconcile := func(paths []string, activate bool, remove func(string)) {
 		// Re-add every candidate parent once per refresh. Native watches are
 		// discarded when a directory is deleted; refreshing the watch before the
 		// membership check heals a directory that was later recreated.
+		desired := make(map[string]struct{}, len(paths))
 		parentResults := make(map[string]error)
 		for _, path := range paths {
 			clean := filepath.Clean(path)
+			desired[clean] = struct{}{}
 			parent := filepath.Dir(clean)
 			armErr, attempted := parentResults[parent]
 			if !attempted {
@@ -100,13 +103,22 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				opts.Activate(clean)
 			}
 		}
+		if remove != nil {
+			for _, path := range ix.Paths() {
+				if _, keep := desired[path]; keep {
+					continue
+				}
+				ix.Remove(path)
+				remove(path)
+			}
+		}
 	}
 
 	initial, err := opts.Load()
 	if err != nil {
 		return err
 	}
-	enroll(initial, false)
+	reconcile(initial, false, nil)
 	if opts.Ready != nil {
 		opts.Ready(Stats{Sources: ix.Len(), Directories: len(ix.Parents())})
 	}
@@ -132,7 +144,12 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	refresh := func() error {
 		paths, loadErr := opts.Load()
 		if loadErr == nil {
-			enroll(paths, true)
+			reconcile(paths, true, func(path string) {
+				sourceDebouncer.Cancel(path)
+				if opts.Remove != nil {
+					opts.Remove(path)
+				}
+			})
 			stopRetry()
 			return nil
 		}
@@ -169,16 +186,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				refreshDebouncer.Trigger(notificationPath)
 				continue
 			}
-			if ev.Op&fsnotify.Remove != 0 {
-				if path, matched := ix.Match(clean); matched {
-					if opts.Unenroll != nil {
-						opts.Unenroll(path)
-					}
-					ix.Remove(path)
-				}
-				continue
-			}
-			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
+			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0 {
 				if path, matched := ix.Match(clean); matched {
 					sourceDebouncer.Trigger(path)
 				}
@@ -188,17 +196,13 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				return nil
 			}
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				logger.Warn("notification queue overflowed; source changes or enrollments may have been missed", "action", "re-run md2obs import on affected files")
+				logger.Warn("notification queue overflowed; source changes or membership updates may have been missed", "action", "restart the watcher or re-run the affected import/untrack command")
 			} else {
 				logger.Error("filesystem watcher error", "err", err)
 			}
 		case path := <-sourceDebouncer.C:
-			opts.Handle(path)
-			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-				ix.Remove(path)
-				if opts.Unenroll != nil {
-					opts.Unenroll(path)
-				}
+			if _, matched := ix.Match(path); matched {
+				opts.Handle(path)
 			}
 		case <-refreshDebouncer.C:
 			if retryC == nil {

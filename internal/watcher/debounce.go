@@ -52,6 +52,19 @@ func (d *Debouncer) Trigger(path string) {
 	entry.timer = time.AfterFunc(d.interval, func() { d.fire(path, entry, generation) })
 }
 
+// Cancel prevents a pending timer for path from firing. A path already queued
+// on C is harmless when the consumer also checks current membership.
+func (d *Debouncer) Cancel(path string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.timers[path]
+	if !ok {
+		return
+	}
+	entry.timer.Stop()
+	delete(d.timers, path)
+}
+
 func (d *Debouncer) fire(path string, entry *timerEntry, generation uint64) {
 	d.mu.Lock()
 	if d.stopped {
