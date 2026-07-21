@@ -231,6 +231,9 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 	select {
 	case err := <-ready:
 		if err != nil {
+			// A readiness error does not guarantee that the child exited: it may
+			// have written a bad marker or closed the protocol fd and kept running.
+			_ = cmd.Process.Kill()
 			waitErr := cmd.Wait()
 			if waitErr == nil {
 				waitErr = errors.New("process exited without reporting an error")

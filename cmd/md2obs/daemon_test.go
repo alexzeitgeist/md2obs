@@ -4,9 +4,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,9 +27,27 @@ func TestDaemonHelperProcess(t *testing.T) {
 		return
 	}
 	fmt.Fprintln(os.Stdout, "daemon helper started")
-	if os.Getenv(daemonTestModeEnv) == "fail" {
+	mode := os.Getenv(daemonTestModeEnv)
+	if mode == "fail" {
 		fmt.Fprintln(os.Stderr, "intentional startup failure")
 		os.Exit(23)
+	}
+	if mode == "bad-marker" {
+		fd, err := strconv.ParseUint(os.Getenv(daemonReadyFDEnv), 10, 32)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(26)
+		}
+		ready := os.NewFile(uintptr(fd), "md2obs-bad-daemon-ready")
+		if ready == nil {
+			os.Exit(27)
+		}
+		_, _ = ready.Write([]byte{daemonReadyByte + 1})
+		_ = ready.Close()
+		// Without parent-side termination, an invalid marker would leave the
+		// launcher blocked in Wait until this deliberately live child exits.
+		time.Sleep(3 * time.Second)
+		return
 	}
 
 	signalReady, cleanup, err := daemonReadySignal()
@@ -135,7 +156,7 @@ func TestStartWatchDaemonRedirectsLogsWhenEnabled(t *testing.T) {
 	if process.LogPath != daemonLogPath(cfg.StateDBPath) {
 		t.Fatalf("log path = %q", process.LogPath)
 	}
-	log := waitForFileContaining(t, process.LogPath, "working directory: /")
+	log := waitForFileContaining(t, process.LogPath, "working directory: /\n")
 	if !strings.Contains(log, "daemon helper started") {
 		t.Fatalf("daemon stdout was not redirected to log:\n%s", log)
 	}
@@ -231,6 +252,41 @@ func TestStartWatchDaemonReportsEarlyExitWithoutLogByDefault(t *testing.T) {
 	}
 	if _, statErr := os.Stat(daemonLogPath(cfg.StateDBPath)); !os.IsNotExist(statErr) {
 		t.Fatalf("failed daemon created a log by default: %v", statErr)
+	}
+}
+
+func TestStartWatchDaemonKillsChildAfterUnexpectedReadyMarker(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		VaultAbs:    root,
+		StateDBPath: filepath.Join(root, "state", "state.db"),
+	}
+	t.Setenv(daemonTestModeEnv, "bad-marker")
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = startWatchDaemon(
+		context.Background(),
+		executable,
+		[]string{"-test.run=^TestDaemonHelperProcess$"},
+		cfg,
+		false,
+	)
+	if err == nil {
+		t.Fatal("unexpected readiness marker was accepted")
+	}
+	if !strings.Contains(err.Error(), "exited before becoming ready") {
+		t.Fatalf("unexpected startup error: %v", err)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("startup error does not retain child exit status: %v", err)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("child wait status = %v, want SIGKILL", exitErr.Sys())
 	}
 }
 
