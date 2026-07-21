@@ -321,4 +321,16 @@ func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T
 	if got[1].CanonicalPath != "/src/recent.md" || got[1].SnapshotDate != "2026-07-20" || got[1].ContentSHA != "sha-20" {
 		t.Errorf("recent candidate = %+v", got[1])
 	}
+	if err := SetWatchActive(ctx, q, recent, vaultA, false, "later"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SelectAllWatchCandidates(ctx, q, "/vault-a"); err != nil || len(got) != 1 || got[0].CanonicalPath != "/src/older.md" {
+		t.Fatalf("inactive all-candidate = %+v, err %v", got, err)
+	}
+	if err := SetWatchActive(ctx, q, recent, vaultA, true, "latest"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SelectAllWatchCandidates(ctx, q, "/vault-a"); err != nil || len(got) != 2 {
+		t.Fatalf("reactivated all-candidates = %+v, err %v", got, err)
+	}
 }
