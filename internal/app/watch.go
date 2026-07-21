@@ -86,7 +86,7 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 
 	handle := func(p string) {
 		// A fired debounce for a missing file means the source was removed;
-		// the directory watch stays, and recreation triggers a new event.
+		// Unenroll persists that decision and recreation requires explicit import.
 		if _, err := os.Stat(p); err != nil {
 			if !os.IsNotExist(err) {
 				d.logger().Error("cannot inspect watched source", "source", p, "err", err)

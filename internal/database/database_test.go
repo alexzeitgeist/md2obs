@@ -263,6 +263,18 @@ func TestSelectWatchCandidatesAreVaultScoped(t *testing.T) {
 	if id, err := GetVaultIDByKey(ctx, q, "/never-registered"); err != nil || id != 0 {
 		t.Errorf("watch candidate query registered vault: id %d, err %v", id, err)
 	}
+	if err := SetWatchActive(ctx, q, recent, vaultA, false, "later"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SelectWatchCandidates(ctx, q, "/vault-a", "2026-07-19", "2026-07-20"); err != nil || len(got) != 0 {
+		t.Fatalf("inactive candidate = %+v, err %v", got, err)
+	}
+	if err := SetWatchActive(ctx, q, recent, vaultA, true, "latest"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SelectWatchCandidates(ctx, q, "/vault-a", "2026-07-19", "2026-07-20"); err != nil || len(got) != 1 {
+		t.Fatalf("reactivated candidate = %+v, err %v", got, err)
+	}
 }
 
 func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T) {

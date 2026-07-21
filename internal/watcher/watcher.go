@@ -39,8 +39,7 @@ type Options struct {
 
 // Run watches exact source paths loaded from SQLite and refreshes membership
 // when an explicit import updates NotificationPath. Removed sources are
-// unenrolled;
-// unrelated paths in armed directories never reach the callbacks.
+// unenrolled, while unrelated paths in armed directories never reach callbacks.
 func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -74,9 +73,8 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 
 	enroll := func(paths []string, activate bool) {
 		// Re-add every candidate parent once per refresh. Native watches are
-		// discarded when a directory is deleted, while Index membership is
-		// intentionally add-only; refreshing the watch before the membership
-		// check heals a directory that was later recreated.
+		// discarded when a directory is deleted; refreshing the watch before the
+		// membership check heals a directory that was later recreated.
 		parentResults := make(map[string]error)
 		for _, path := range paths {
 			clean := filepath.Clean(path)
