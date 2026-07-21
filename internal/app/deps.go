@@ -25,7 +25,7 @@ type Deps struct {
 	Log    *slog.Logger
 	// WatchReady is called once RunWatch has loaded its initial membership and
 	// armed the underlying filesystem watches. The CLI uses it to acknowledge
-	// successful startup to a parent process when --daemon is requested.
+	// successful startup to a parent process for `watch start`.
 	WatchReady func()
 
 	logOnce sync.Once

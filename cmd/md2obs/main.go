@@ -25,7 +25,11 @@ const usage = `md2obs imports explicitly selected Markdown files into an Obsidia
 Usage:
   md2obs FILE...
   md2obs import FILE...
-  md2obs watch [--daemon [--log]] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+  md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+  md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
+  md2obs watch status
+  md2obs watch stop
+  md2obs watch restart [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs list
   md2obs history FILE
   md2obs status
@@ -37,14 +41,15 @@ Commands:
   watch    Watch sources materialized in this vault today (--days N widens
            the initial window) and enroll later imports while running.
            Re-import watched sources when they change.
-           --daemon starts the watcher in the background. Its output is
-           discarded unless --log is also specified.
+           start runs one managed watcher for this database and vault in the
+           background. status, stop, and restart manage that instance.
+           Managed watcher output is discarded unless --log is specified.
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
            since the last import: skip (default), overwrite, or preserve.
   list     List known sources and their most recent snapshot.
   history  Show dated snapshots for one source.
-  status   Show configuration, database location, and counts.
+  status   Show configuration, database location, counts, and watcher state.
 
 Configuration:
   Config file  ~/.config/md2obs/config.json (Linux)
@@ -60,18 +65,28 @@ var commandUsage = map[string]string{
 Import or refresh explicitly named Markdown files. An explicit import restores
 the source content if the vault copy was edited.
 `,
-	"watch": `Usage: md2obs watch [OPTIONS]
+	"watch": `Usage:
+  md2obs watch [OPTIONS]
+  md2obs watch start [OPTIONS]
+  md2obs watch status
+  md2obs watch stop
+  md2obs watch restart [OPTIONS]
 
 Watch sources recently imported into the configured vault using native
-filesystem notifications. Successful imports join a running watch session.
+filesystem notifications. With no subcommand the watcher stays in the
+foreground. Successful imports join a running watch session.
 
 Options:
-  --daemon                    Run in the background (Linux and macOS)
-  --log                       Log daemon output beside the state database
-                              (requires --daemon)
   --days N                    Inclusive calendar-day window (default 1)
   --debounce DURATION         Per-source quiet period (default 500ms)
   --on-vault-change POLICY    skip (default), overwrite, or preserve
+
+Managed watcher commands:
+  start                       Start one background watcher (Linux and macOS)
+  status                      Report whether the managed watcher is running
+  stop                        Send SIGTERM and wait for a graceful exit
+  restart                     Stop the managed watcher, then start it again
+  --log                       On start/restart, log output beside the database
 `,
 	"list": `Usage: md2obs list
 
@@ -83,7 +98,8 @@ Show dated snapshots for one explicitly imported source.
 `,
 	"status": `Usage: md2obs status
 
-Show configuration, database location, schema version, and counts.
+Show configuration, database location, schema version, counts, and managed
+watcher state.
 `,
 }
 
@@ -118,7 +134,7 @@ func run(args []string) int {
 	}
 
 	var watchReady func()
-	if command == "watch" && options.daemon && isDaemonChild() {
+	if command == "watch" && options.watchAction == watchStart && isDaemonChild() {
 		var cleanup func()
 		watchReady, cleanup, err = daemonReadySignal()
 		if err != nil {
@@ -133,20 +149,66 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 1
 	}
-	if command == "watch" && options.daemon && isDaemonChild() {
+	var releaseManagedWatch func()
+	if command == "watch" && options.watchAction == watchStart && isDaemonChild() {
+		_, releaseManagedWatch, err = claimManagedWatch(cfg, managedSettings(options))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+			return 1
+		}
+		defer releaseManagedWatch()
 		fmt.Fprintf(os.Stdout, "Starting md2obs watch daemon (PID %d)\n", os.Getpid())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if command == "watch" && options.daemon && !isDaemonChild() {
+	if command == "watch" && !isDaemonChild() {
+		switch options.watchAction {
+		case watchStatus:
+			state, err := inspectManagedWatch(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(os.Stdout, formatManagedWatchStatus(state))
+			return 0
+		case watchStop:
+			return runWatchStop(ctx, cfg)
+		case watchRestart:
+			state, err := inspectManagedWatch(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+				return 1
+			}
+			if state.Running && !options.watchSettingsSet {
+				applyManagedSettings(&options, state.Record.Settings)
+			}
+			if state.Running {
+				if code := runWatchStop(ctx, cfg); code != 0 {
+					return code
+				}
+			}
+			options.watchAction = watchStart
+		}
+	}
+
+	if command == "watch" && options.watchAction == watchStart && !isDaemonChild() {
+		state, err := inspectManagedWatch(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+			return 1
+		}
+		if state.Running {
+			fmt.Fprintf(os.Stderr, "md2obs: watch daemon is already running (PID %d)\n", state.Record.PID)
+			return 1
+		}
 		executable, err := os.Executable()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "md2obs: resolve executable for daemon: %v\n", err)
 			return 1
 		}
-		process, err := launchWatchDaemon(ctx, executable, args, cfg, options.log)
+		process, err := launchWatchDaemon(ctx, executable, managedWatchArgs(options), cfg, options.log)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 			return 1
@@ -180,15 +242,36 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 1
 	}
+	if command == "status" {
+		state, err := inspectManagedWatch(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, formatManagedWatchStatus(state))
+	}
 	return 0
 }
+
+type watchAction uint8
+
+const (
+	watchForeground watchAction = iota
+	watchStart
+	watchStatus
+	watchStop
+	watchRestart
+)
 
 type commandOptions struct {
 	files       []string
 	historyFile string
 	watch       app.WatchOptions
-	daemon      bool
-	log         bool
+	watchAction watchAction
+	// watchSettingsSet distinguishes a bare restart, which preserves the
+	// running instance's settings, from a restart with replacement settings.
+	watchSettingsSet bool
+	log              bool
 }
 
 func commandFlagSet(name string) *flag.FlagSet {
@@ -214,9 +297,26 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		return options, nil
 
 	case "watch":
+		options.watchAction = watchForeground
+		if len(args) > 0 {
+			switch args[0] {
+			case "start":
+				options.watchAction = watchStart
+				args = args[1:]
+			case "status":
+				return parseWatchLifecycleCommand(options, watchStatus, args[1:])
+			case "stop":
+				return parseWatchLifecycleCommand(options, watchStop, args[1:])
+			case "restart":
+				options.watchAction = watchRestart
+				args = args[1:]
+			}
+		}
 		fs := commandFlagSet("watch")
-		daemon := fs.Bool("daemon", false, "run the watcher in the background")
-		logOutput := fs.Bool("log", false, "log daemon output beside the state database")
+		var logOutput *bool
+		if options.watchAction == watchStart || options.watchAction == watchRestart {
+			logOutput = fs.Bool("log", false, "log daemon output beside the state database")
+		}
 		days := fs.Int("days", 1, "inclusive calendar-day window (1 = today)")
 		debounce := fs.Duration("debounce", app.DefaultDebounce, "per-source quiet period before re-import")
 		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
@@ -224,7 +324,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs watch [--daemon [--log]] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]")
+			return options, fmt.Errorf("usage: md2obs watch [start|status|stop|restart] [OPTIONS]")
 		}
 		policy, err := app.ParsePolicy(*policyFlag)
 		if err != nil {
@@ -235,11 +335,10 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			Debounce:      *debounce,
 			OnVaultChange: policy,
 		}
-		options.daemon = *daemon
-		options.log = *logOutput
-		if options.log && !options.daemon {
-			return options, fmt.Errorf("--log requires --daemon")
+		if logOutput != nil {
+			options.log = *logOutput
 		}
+		fs.Visit(func(*flag.Flag) { options.watchSettingsSet = true })
 		if err := options.watch.Validate(); err != nil {
 			return options, err
 		}
@@ -279,11 +378,30 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 	return options, fmt.Errorf("unhandled command %q", command)
 }
 
+func parseWatchLifecycleCommand(options commandOptions, action watchAction, args []string) (commandOptions, error) {
+	options.watchAction = action
+	fs := commandFlagSet("watch")
+	if err := fs.Parse(args); err != nil {
+		return options, err
+	}
+	if fs.NArg() != 0 {
+		name := "status"
+		if action == watchStop {
+			name = "stop"
+		}
+		return options, fmt.Errorf("usage: md2obs watch %s", name)
+	}
+	return options, nil
+}
+
 func dispatch(ctx context.Context, deps *app.Deps, command string, options commandOptions) error {
 	switch command {
 	case "import":
 		return app.RunImport(ctx, deps, options.files)
 	case "watch":
+		if options.watchAction != watchForeground && !(options.watchAction == watchStart && isDaemonChild()) {
+			return fmt.Errorf("internal error: unmanaged watch lifecycle action reached dispatcher")
+		}
 		return app.RunWatch(ctx, deps, options.watch)
 	case "list":
 		return app.RunList(ctx, deps)

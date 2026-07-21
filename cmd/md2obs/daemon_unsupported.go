@@ -8,5 +8,5 @@ import (
 )
 
 func configureDaemonProcess(*exec.Cmd) error {
-	return errors.New("--daemon is supported only on Linux and macOS")
+	return errors.New("managed watch commands are supported only on Linux and macOS")
 }

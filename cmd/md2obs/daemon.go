@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"md2obs/internal/app"
 	"md2obs/internal/config"
 )
 
@@ -26,9 +28,112 @@ type daemonProcess struct {
 	LogPath string
 }
 
+const managedWatchRecordVersion = 1
+
+// managedWatchSettings are persisted with the instance so a bare restart can
+// preserve the settings of the running watcher.
+type managedWatchSettings struct {
+	Days          int    `json:"days"`
+	Debounce      string `json:"debounce"`
+	OnVaultChange string `json:"on_vault_change"`
+	Log           bool   `json:"log"`
+}
+
+// managedWatchRecord is both the human-inspectable instance record and the
+// contents protected by the live daemon's lease. ProcessIdentity is an OS
+// start marker; InstanceID identifies this particular acquisition of the
+// lease rather than merely a PID.
+type managedWatchRecord struct {
+	Version         int                  `json:"version"`
+	PID             int                  `json:"pid"`
+	InstanceID      string               `json:"instance_id"`
+	StartedAt       time.Time            `json:"started_at"`
+	ProcessIdentity string               `json:"process_identity"`
+	StateDatabase   string               `json:"state_database"`
+	Vault           string               `json:"vault"`
+	Settings        managedWatchSettings `json:"settings"`
+}
+
+type managedWatchState struct {
+	Running     bool
+	Unsupported bool
+	Record      managedWatchRecord
+}
+
+var managedWatchStopTimeout = 10 * time.Second
+
 // launchWatchDaemon is replaceable in command tests. Production calls always
 // use startWatchDaemon.
 var launchWatchDaemon = startWatchDaemon
+
+func managedSettings(options commandOptions) managedWatchSettings {
+	return managedWatchSettings{
+		Days:          options.watch.Days,
+		Debounce:      options.watch.Debounce.String(),
+		OnVaultChange: string(options.watch.OnVaultChange),
+		Log:           options.log,
+	}
+}
+
+func applyManagedSettings(options *commandOptions, settings managedWatchSettings) {
+	debounce, err := time.ParseDuration(settings.Debounce)
+	if err != nil || settings.Days < 1 {
+		return
+	}
+	policy, err := app.ParsePolicy(settings.OnVaultChange)
+	if err != nil {
+		return
+	}
+	options.watch = app.WatchOptions{
+		Days:          settings.Days,
+		Debounce:      debounce,
+		OnVaultChange: policy,
+	}
+	options.log = settings.Log
+}
+
+func managedWatchArgs(options commandOptions) []string {
+	settings := managedSettings(options)
+	args := []string{
+		"watch",
+		"start",
+		"--days=" + strconv.Itoa(settings.Days),
+		"--debounce=" + settings.Debounce,
+		"--on-vault-change=" + settings.OnVaultChange,
+	}
+	if settings.Log {
+		args = append(args, "--log")
+	}
+	return args
+}
+
+func formatManagedWatchStatus(state managedWatchState) string {
+	if state.Unsupported {
+		return "Watch daemon:      unsupported on this platform"
+	}
+	if !state.Running {
+		return "Watch daemon:      stopped"
+	}
+	return fmt.Sprintf(
+		"Watch daemon:      running (PID %d, started %s)",
+		state.Record.PID,
+		state.Record.StartedAt.Local().Format(time.RFC3339),
+	)
+}
+
+func runWatchStop(ctx context.Context, cfg *config.Config) int {
+	record, stopped, err := stopManagedWatch(ctx, cfg, managedWatchStopTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
+		return 1
+	}
+	if !stopped {
+		fmt.Fprintln(os.Stdout, "No md2obs watch daemon is running.")
+		return 0
+	}
+	fmt.Fprintf(os.Stdout, "Stopped md2obs watch daemon (PID %d)\n", record.PID)
+	return 0
+}
 
 // startWatchDaemon re-executes md2obs with the same watch arguments. The
 // readiness pipe is inherited as fd 3; the child acknowledges only after the
@@ -106,6 +211,12 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 			waitErr := cmd.Wait()
 			if waitErr == nil {
 				waitErr = errors.New("process exited without reporting an error")
+			}
+			// A concurrent start may have won the lease after the caller's
+			// preflight check but before this child acquired it. Surface that
+			// actionable result even when daemon logging is disabled.
+			if state, inspectErr := inspectManagedWatch(cfg); inspectErr == nil && state.Running && state.Record.PID != cmd.Process.Pid {
+				return daemonProcess{}, fmt.Errorf("watch daemon is already running (PID %d)", state.Record.PID)
 			}
 			if logPath != "" {
 				return daemonProcess{}, fmt.Errorf("watch daemon exited before becoming ready: %w (log: %s)", waitErr, logPath)

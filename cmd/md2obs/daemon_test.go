@@ -159,7 +159,7 @@ func TestStartWatchDaemonHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := startWatchDaemon(ctx, "/does/not/matter", []string{"watch", "--daemon"}, cfg, false)
+	_, err := startWatchDaemon(ctx, "/does/not/matter", []string{"watch", "start"}, cfg, false)
 	if err == nil || err != context.Canceled {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
