@@ -155,6 +155,9 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	if err != nil {
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
+	if err := database.SetWatchActive(ctx, tx, srcID, vaultID, true, nowUTC); err != nil {
+		return Result{}, fmt.Errorf("import %s: %w", display, err)
+	}
 	layoutJSON, _ := json.Marshal(map[string]string{"root_directory": d.Config.RootDirectory})
 	layoutID, err := database.EnsureLayout(ctx, tx, d.Layout.Name(), d.Layout.Version(), string(layoutJSON), nowUTC)
 	if err != nil {

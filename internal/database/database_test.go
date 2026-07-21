@@ -25,7 +25,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("first open: %v", err)
 	}
 	v, err := db.SchemaVersion(ctx)
-	if err != nil || v != 1 {
+	if err != nil || v != 2 {
 		t.Fatalf("schema version = %d, err %v", v, err)
 	}
 	db.Close()
@@ -35,7 +35,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer db.Close()
-	if v, err = db.SchemaVersion(ctx); err != nil || v != 1 {
+	if v, err = db.SchemaVersion(ctx); err != nil || v != 2 {
 		t.Fatalf("schema version after reopen = %d, err %v", v, err)
 	}
 }

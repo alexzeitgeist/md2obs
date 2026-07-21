@@ -120,6 +120,22 @@ type WatchCandidate struct {
 	ContentSHA   string
 }
 
+// SetWatchActive records whether a source remains eligible for automatic
+// watching in a vault. Explicit imports reactivate a source; observed
+// deletion deactivates it until the user imports it again.
+func SetWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64, active bool, nowUTC string) error {
+	value := 0
+	if active {
+		value = 1
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO watch_tracking (source_id, vault_id, active, updated_at_utc)
+		VALUES (?, ?, ?, ?) ON CONFLICT (source_id, vault_id) DO UPDATE SET active = excluded.active, updated_at_utc = excluded.updated_at_utc`, sourceID, vaultID, value, nowUTC)
+	if err != nil {
+		return fmt.Errorf("set watch tracking for source %d: %w", sourceID, err)
+	}
+	return nil
+}
+
 // SelectWatchCandidates returns sources whose newest snapshot inside the
 // inclusive date range was materialized in vaultKey. A snapshot belonging
 // only to another vault never confers watch membership.
@@ -140,7 +156,9 @@ func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 		    ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v
 		    ON v.vault_id = m.vault_id
+		LEFT JOIN watch_tracking AS wt ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
 		WHERE v.vault_key = ?
+		  AND COALESCE(wt.active, 1) = 1
 		  AND sn.snapshot_date >= ?
 		  AND sn.snapshot_date <= ?
 		  AND sn.snapshot_date = (
@@ -194,7 +212,9 @@ func SelectAllWatchCandidates(ctx context.Context, q Querier, vaultKey string) (
 		    ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v
 		    ON v.vault_id = m.vault_id
+		LEFT JOIN watch_tracking AS wt ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
 		WHERE v.vault_key = ?
+		  AND COALESCE(wt.active, 1) = 1
 		  AND sn.snapshot_date = (
 		      SELECT MAX(sn2.snapshot_date)
 		      FROM snapshots AS sn2

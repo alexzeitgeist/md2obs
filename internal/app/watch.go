@@ -88,6 +88,16 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		// A fired debounce for a missing file means the source was removed;
 		// the directory watch stays, and recreation triggers a new event.
 		if _, err := os.Stat(p); err != nil {
+			if os.IsNotExist(err) {
+				if candidate, ok := selected[p]; ok {
+					if vaultID, dbErr := database.GetVaultIDByKey(ctx, d.DB.Query(), d.Config.VaultAbs); dbErr == nil && vaultID != 0 {
+						if dbErr = database.SetWatchActive(ctx, d.DB.Query(), candidate.ID, vaultID, false, utc(d.Now())); dbErr != nil {
+							d.logger().Error("cannot persist source deletion", "source", p, "err", dbErr)
+						}
+					}
+				}
+				selected[p] = database.WatchCandidate{}
+			}
 			if !os.IsNotExist(err) {
 				d.logger().Error("cannot inspect watched source", "source", p, "err", err)
 			}
@@ -130,6 +140,16 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		Load:             load,
 		Activate:         activate,
 		Handle:           handle,
+		Unenroll: func(p string) {
+			if candidate, ok := selected[p]; ok {
+				if vaultID, err := database.GetVaultIDByKey(ctx, d.DB.Query(), d.Config.VaultAbs); err == nil && vaultID != 0 {
+					if err := database.SetWatchActive(ctx, d.DB.Query(), candidate.ID, vaultID, false, utc(d.Now())); err != nil {
+						d.logger().Error("cannot persist source deletion", "source", p, "err", err)
+					}
+				}
+				delete(selected, p)
+			}
+		},
 		Ready: func(stats watcher.Stats) {
 			fmt.Fprintf(d.Out, "Watching %d imported sources from %d directories\n", stats.Sources, stats.Directories)
 			fmt.Fprintf(d.Out, "Date range: %s through %s\n", discoveryFrom, discoveryTo)

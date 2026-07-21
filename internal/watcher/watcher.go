@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -32,6 +33,7 @@ type Options struct {
 	Load             func() ([]string, error)
 	Activate         func(path string)
 	Handle           func(path string)
+	Unenroll         func(path string)
 	Ready            func(Stats)
 }
 
@@ -168,6 +170,15 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				refreshDebouncer.Trigger(notificationPath)
 				continue
 			}
+			if ev.Op&fsnotify.Remove != 0 {
+				if path, matched := ix.Match(clean); matched {
+					if opts.Unenroll != nil {
+						opts.Unenroll(path)
+					}
+					ix.Remove(path)
+				}
+				continue
+			}
 			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
 				if path, matched := ix.Match(clean); matched {
 					sourceDebouncer.Trigger(path)
@@ -184,6 +195,12 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 			}
 		case path := <-sourceDebouncer.C:
 			opts.Handle(path)
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				ix.Remove(path)
+				if opts.Unenroll != nil {
+					opts.Unenroll(path)
+				}
+			}
 		case <-refreshDebouncer.C:
 			if retryC == nil {
 				if err := refresh(); err != nil {

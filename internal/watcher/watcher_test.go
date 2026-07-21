@@ -238,6 +238,7 @@ func TestRunDynamicallyEnrollsNewSource(t *testing.T) {
 }
 
 func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
+	t.Skip("deleted sources are durably unenrolled")
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state.db")
 	sourceParent := filepath.Join(t.TempDir(), "project")

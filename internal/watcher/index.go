@@ -47,6 +47,16 @@ func (ix *Index) Add(path string) bool {
 	return true
 }
 
+// Remove stops matching a source for the remainder of the watch session.
+func (ix *Index) Remove(path string) bool {
+	clean := filepath.Clean(path)
+	if _, ok := ix.sources[clean]; !ok {
+		return false
+	}
+	delete(ix.sources, clean)
+	return true
+}
+
 // Match reports whether an event path is one of the selected sources,
 // returning its cleaned form.
 func (ix *Index) Match(eventPath string) (string, bool) {
