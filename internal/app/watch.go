@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -115,6 +116,9 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		}
 		canonical, _, err := source.Canonicalize(p)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return
+			}
 			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
 			return
 		}
@@ -125,6 +129,9 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 		}
 		_, sha, err := source.ReadAndHash(canonical)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return
+			}
 			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
 			return
 		}

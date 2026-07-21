@@ -68,21 +68,29 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	}
 
 	ix := NewIndex(nil)
-	watchedDirs := map[string]struct{}{notificationParent: {}}
 
 	enroll := func(paths []string, activate bool) {
+		// Re-add every candidate parent once per refresh. Native watches are
+		// discarded when a directory is deleted, while Index membership is
+		// intentionally add-only; refreshing the watch before the membership
+		// check heals a directory that was later recreated.
+		parentResults := make(map[string]error)
 		for _, path := range paths {
 			clean := filepath.Clean(path)
-			if _, exists := ix.Match(clean); exists {
+			parent := filepath.Dir(clean)
+			armErr, attempted := parentResults[parent]
+			if !attempted {
+				armErr = w.Add(parent)
+				parentResults[parent] = armErr
+				if armErr != nil {
+					logger.Warn("cannot watch source directory", "source", clean, "parent", parent, "err", armErr)
+				}
+			}
+			if armErr != nil {
 				continue
 			}
-			parent := filepath.Dir(clean)
-			if _, armed := watchedDirs[parent]; !armed {
-				if err := w.Add(parent); err != nil {
-					logger.Warn("cannot watch source directory", "source", clean, "parent", parent, "err", err)
-					continue
-				}
-				watchedDirs[parent] = struct{}{}
+			if _, exists := ix.Match(clean); exists {
+				continue
 			}
 			if !ix.Add(clean) {
 				continue

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,6 +262,64 @@ func TestWatchEnrollsImportAfterEmptyStartup(t *testing.T) {
 	}
 }
 
+func TestWatchRapidImportsAllBecomeEnrolled(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("empty watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	type importedSource struct {
+		path     string
+		vaultAbs string
+		want     string
+	}
+	var imported []importedSource
+	for i, name := range []string{"rapid-a.md", "rapid-b.md", "rapid-c.md"} {
+		src := writeSource(t, t.TempDir(), name, "# initial\n")
+		res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("# changed-%d\n", i)
+		if err := os.WriteFile(src, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		imported = append(imported, importedSource{
+			path:     src,
+			vaultAbs: filepath.Join(env.vault, filepath.FromSlash(res.RelPath)),
+			want:     want,
+		})
+	}
+
+	for _, item := range imported {
+		if !waitUntil(5*time.Second, func() bool {
+			data, err := os.ReadFile(item.vaultAbs)
+			return err == nil && string(data) == item.want
+		}) {
+			t.Fatalf("rapid import %s was not enrolled; output:\n%s", item.path, env.out.String())
+		}
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
 func TestWatchDynamicEnrollmentIsVaultScoped(t *testing.T) {
 	envA := newTestEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -390,8 +449,24 @@ func TestWatchUnchangedActivationLeavesVaultEditAlone(t *testing.T) {
 	}
 
 	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
-	src := writeSource(t, t.TempDir(), "vault-edit.md", "# source\n")
+	sourceDir := t.TempDir()
+	src := writeSource(t, sourceDir, "a-vault-edit.md", "# source\n")
 	res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastSeenBefore string
+	if err := importer.DB.Query().QueryRowContext(ctx,
+		`SELECT last_seen_at_utc FROM sources WHERE canonical_path = ?`, src,
+	).Scan(&lastSeenBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	// A changed source sorted after the unchanged source serves as a positive
+	// acknowledgement that the same membership refresh completed, avoiding a
+	// fixed sleep for the negative assertions below.
+	sentinel := writeSource(t, sourceDir, "z-sentinel.md", "# sentinel-one\n")
+	sentinelRes, err := ImportFile(ctx, importer, sentinel, PolicyOverwrite)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,10 +474,20 @@ func TestWatchUnchangedActivationLeavesVaultEditAlone(t *testing.T) {
 	if err := os.WriteFile(vaultAbs, []byte("# phone edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(sentinel, []byte("# sentinel-two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.setNow(time.Date(2026, 7, 20, 11, 0, 0, 0, time.Local))
 	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	sentinelVault := filepath.Join(env.vault, filepath.FromSlash(sentinelRes.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(sentinelVault)
+		return err == nil && string(data) == "# sentinel-two\n"
+	}) {
+		t.Fatalf("sentinel activation did not complete; output:\n%s", env.out.String())
+	}
 	data, err := os.ReadFile(vaultAbs)
 	if err != nil {
 		t.Fatal(err)
@@ -412,6 +497,80 @@ func TestWatchUnchangedActivationLeavesVaultEditAlone(t *testing.T) {
 	}
 	if strings.Contains(env.out.String(), "unchanged:") {
 		t.Fatalf("unchanged activation produced import output:\n%s", env.out.String())
+	}
+	var lastSeenAfter string
+	if err := importer.DB.Query().QueryRowContext(ctx,
+		`SELECT last_seen_at_utc FROM sources WHERE canonical_path = ?`, src,
+	).Scan(&lastSeenAfter); err != nil {
+		t.Fatal(err)
+	}
+	if lastSeenAfter != lastSeenBefore {
+		t.Fatalf("unchanged activation mutated source last_seen: %s -> %s", lastSeenBefore, lastSeenAfter)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchMissingActivationIsSilentAndRecreationWorks(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	sourceDir := t.TempDir()
+	missing := writeSource(t, sourceDir, "a-missing.md", "# one\n")
+	missingRes, err := ImportFile(ctx, importer, missing, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := writeSource(t, sourceDir, "z-sentinel.md", "# sentinel-one\n")
+	sentinelRes, err := ImportFile(ctx, importer, sentinel, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("# sentinel-two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	sentinelVault := filepath.Join(env.vault, filepath.FromSlash(sentinelRes.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(sentinelVault)
+		return err == nil && string(data) == "# sentinel-two\n"
+	}) {
+		t.Fatalf("sentinel activation did not complete; output:\n%s", env.out.String())
+	}
+	if strings.Contains(env.out.String(), "cannot inspect newly watched source") {
+		t.Fatalf("missing activation was logged as an error:\n%s", env.out.String())
+	}
+
+	if err := os.WriteFile(missing, []byte("# recreated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missingVault := filepath.Join(env.vault, filepath.FromSlash(missingRes.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(missingVault)
+		return err == nil && string(data) == "# recreated\n"
+	}) {
+		t.Fatalf("recreated missing source was not handled; output:\n%s", env.out.String())
 	}
 
 	cancel()
@@ -477,6 +636,71 @@ func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
 		return err == nil && string(data) == "# restored\n"
 	}) {
 		t.Fatalf("restored dynamic identity was no longer watched; output:\n%s", env.out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunWatch: %v", err)
+	}
+}
+
+func TestWatchActivationImportFailureKeepsSourceEnrolled(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWatch(ctx, env.deps, WatchOptions{
+			Days: 1, Debounce: 50 * time.Millisecond, OnVaultChange: PolicySkip,
+		})
+	}()
+	defer cancel()
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+	}) {
+		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
+	}
+
+	importer := openWatchTestDeps(t, env.deps.Config, env.deps.Now)
+	src := writeSource(t, t.TempDir(), "activation-error.md", "# one\n")
+	res, err := ImportFile(ctx, importer, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("# two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the recorded path just long enough to make the activation's
+	// watched import fail its containment check after the hash gate.
+	if _, err := importer.DB.Query().ExecContext(ctx,
+		`UPDATE materializations SET relative_path = ? WHERE relative_path = ?`,
+		"../activation-error.md", res.RelPath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.NotifyImport(importer.DB.Path); err != nil {
+		t.Fatal(err)
+	}
+	if !waitUntil(5*time.Second, func() bool {
+		return strings.Contains(env.out.String(), "watch activation import failed")
+	}) {
+		t.Fatalf("activation import failure was not reported; output:\n%s", env.out.String())
+	}
+
+	if _, err := importer.DB.Query().ExecContext(ctx,
+		`UPDATE materializations SET relative_path = ? WHERE relative_path = ?`,
+		res.RelPath, "../activation-error.md",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("# three\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(res.RelPath))
+	if !waitUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(vaultAbs)
+		return err == nil && string(data) == "# three\n"
+	}) {
+		t.Fatalf("source was not retained after activation failure; output:\n%s", env.out.String())
 	}
 
 	cancel()

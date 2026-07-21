@@ -237,6 +237,93 @@ func TestRunDynamicallyEnrollsNewSource(t *testing.T) {
 	}
 }
 
+func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state.db")
+	sourceParent := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(sourceParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := filepath.Join(sourceParent, "initial.md")
+	dynamic := filepath.Join(sourceParent, "dynamic.md")
+	if err := os.WriteFile(initial, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var includeDynamic atomic.Bool
+	ready := make(chan Stats, 1)
+	activated := make(chan string, 1)
+	handled := make(chan string, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: NotificationPath(databasePath),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load: func() ([]string, error) {
+				if includeDynamic.Load() {
+					return []string{initial, dynamic}, nil
+				}
+				return []string{initial}, nil
+			},
+			Activate: func(path string) { activated <- path },
+			Handle:   func(path string) { handled <- path },
+			Ready:    func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	defer cancel()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+
+	if err := os.RemoveAll(sourceParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sourceParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(initial, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dynamic, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	includeDynamic.Store(true)
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-activated:
+		if path != dynamic {
+			t.Fatalf("activated %q, want %q", path, dynamic)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("new source in recreated directory was not activated")
+	}
+
+	// Activation proves the membership refresh completed. A later write to an
+	// already-enrolled path proves that refresh also restored the native watch.
+	if err := os.WriteFile(initial, []byte("three"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-handled:
+		if path != initial {
+			t.Fatalf("handled %q, want %q", path, initial)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recreated source directory was not re-armed")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestRunRetriesMembershipRefresh(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state.db")
@@ -247,6 +334,7 @@ func TestRunRetriesMembershipRefresh(t *testing.T) {
 	}
 
 	var calls atomic.Int32
+	firstFailure := make(chan struct{}, 1)
 	ready := make(chan Stats, 1)
 	activated := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -260,6 +348,9 @@ func TestRunRetriesMembershipRefresh(t *testing.T) {
 				call := calls.Add(1)
 				if call == 1 {
 					return nil, nil
+				}
+				if call == 2 {
+					firstFailure <- struct{}{}
 				}
 				if call < 4 {
 					return nil, errors.New("transient load failure")
@@ -277,6 +368,16 @@ func TestRunRetriesMembershipRefresh(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher did not become ready")
 	}
+	if err := NotifyImport(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstFailure:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first refresh failure was not observed")
+	}
+	// This notification lands during the 100 ms retry backoff. It must be
+	// covered by the pending retry rather than starting a parallel refresh.
 	if err := NotifyImport(databasePath); err != nil {
 		t.Fatal(err)
 	}
