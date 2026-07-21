@@ -16,7 +16,9 @@ func NotificationPath(databasePath string) string {
 	return databasePath + notificationSuffix
 }
 
-// NotifyImport wakes watch processes after a successful explicit import.
+// NotifyImport wakes watch processes after imports may have changed their
+// vault-scoped membership. Callers may coalesce multiple imports into one
+// notification.
 func NotifyImport(databasePath string) error {
 	path := NotificationPath(databasePath)
 	token := strconv.FormatInt(time.Now().UnixNano(), 10) + "\n"

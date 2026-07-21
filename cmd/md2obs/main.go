@@ -25,6 +25,7 @@ const usage = `md2obs imports explicitly selected Markdown files into an Obsidia
 Usage:
   md2obs FILE...
   md2obs import FILE...
+  md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs watch stop
@@ -37,6 +38,10 @@ Commands:
   import   Import (or refresh) the named Markdown files into today's
            dated vault folder. This is the default when the command is
            omitted. Explicit imports always overwrite.
+  refresh  Check previously imported sources for changes and catch up the
+           changed ones. --days selects recent materializations (default 1);
+           --all selects every source ever materialized in this vault.
+           Vault edits are skipped by default.
   watch    Watch sources materialized in this vault today (--days N widens
            the initial window) and enroll later imports while running.
            Re-import watched sources when they change.
@@ -63,6 +68,17 @@ var commandUsage = map[string]string{
 
 Import or refresh explicitly named Markdown files. An explicit import restores
 the source content if the vault copy was edited.
+`,
+	"refresh": `Usage:
+  md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
+
+Check sources previously materialized in the configured vault and import the
+ones whose current content differs from their selected snapshot.
+
+Options:
+  --days N                    Materialization date window (default 1)
+  --all                       Every source ever materialized in this vault
+  --on-vault-change POLICY    skip (default), overwrite, or preserve
 `,
 	"watch": `Usage:
   md2obs watch [OPTIONS]
@@ -115,7 +131,7 @@ func run(args []string) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
-	case "import", "watch", "list", "history", "status":
+	case "import", "refresh", "watch", "list", "history", "status":
 	default:
 		command = "import"
 		commandArgs = args
@@ -260,6 +276,7 @@ const (
 type commandOptions struct {
 	files       []string
 	historyFile string
+	refresh     app.RefreshOptions
 	watch       app.WatchOptions
 	watchAction watchAction
 	// watchSettingsSet distinguishes a bare restart, which preserves the
@@ -288,6 +305,44 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			return options, fmt.Errorf("usage: md2obs import FILE...")
 		}
 		options.files = fs.Args()
+		return options, nil
+
+	case "refresh":
+		fs := commandFlagSet("refresh")
+		days := fs.Int("days", 1, "materialization date window (1 = today)")
+		allSources := fs.Bool("all", false, "every source ever materialized in this vault")
+		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
+		if err := fs.Parse(args); err != nil {
+			return options, err
+		}
+		if fs.NArg() != 0 {
+			return options, fmt.Errorf("usage: md2obs refresh [--days N | --all] [--on-vault-change=POLICY]")
+		}
+		daysSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "days" {
+				daysSet = true
+			}
+		})
+		if *allSources && daysSet {
+			return options, fmt.Errorf("--all cannot be combined with --days")
+		}
+		policy, err := app.ParsePolicy(*policyFlag)
+		if err != nil {
+			return options, err
+		}
+		refreshDays := *days
+		if *allSources {
+			refreshDays = 0
+		}
+		options.refresh = app.RefreshOptions{
+			Days:          refreshDays,
+			All:           *allSources,
+			OnVaultChange: policy,
+		}
+		if err := options.refresh.Validate(); err != nil {
+			return options, err
+		}
 		return options, nil
 
 	case "watch":
@@ -386,6 +441,8 @@ func dispatch(ctx context.Context, deps *app.Deps, command string, options comma
 	switch command {
 	case "import":
 		return app.RunImport(ctx, deps, options.files)
+	case "refresh":
+		return app.RunRefresh(ctx, deps, options.refresh)
 	case "watch":
 		if options.watchAction != watchForeground && !(options.watchAction == watchStart && isDaemonChild()) {
 			return fmt.Errorf("internal error: unmanaged watch lifecycle action reached dispatcher")

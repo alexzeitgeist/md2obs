@@ -264,3 +264,49 @@ func TestSelectWatchCandidatesAreVaultScoped(t *testing.T) {
 		t.Errorf("watch candidate query registered vault: id %d, err %v", id, err)
 	}
 }
+
+func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	q := db.Query()
+
+	vaultA, _ := EnsureVault(ctx, q, "/vault-a", "a", "/vault-a", "t")
+	vaultB, _ := EnsureVault(ctx, q, "/vault-b", "b", "/vault-b", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
+
+	recent, _ := UpsertSource(ctx, q, "/src/recent.md", "/src/recent.md", "t")
+	r19, _ := FindOrCreateRevision(ctx, q, recent, "sha-19", 1, 1, "t")
+	r20, _ := FindOrCreateRevision(ctx, q, recent, "sha-20", 1, 2, "t")
+	s19, _ := CreateSnapshot(ctx, q, recent, r19, "2026-07-19", "t")
+	s20, _ := CreateSnapshot(ctx, q, recent, r20, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "t")
+	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "t")
+
+	older, _ := UpsertSource(ctx, q, "/src/older.md", "/src/older.md", "t")
+	rOld, _ := FindOrCreateRevision(ctx, q, older, "sha-old", 1, 1, "t")
+	sOld, _ := CreateSnapshot(ctx, q, older, rOld, "2025-01-01", "t")
+	CreateMaterialization(ctx, q, sOld, vaultA, layoutID, "_External/old.md", rOld, "t")
+
+	foreign, _ := UpsertSource(ctx, q, "/src/foreign.md", "/src/foreign.md", "t")
+	rForeign, _ := FindOrCreateRevision(ctx, q, foreign, "sha-foreign", 1, 1, "t")
+	sForeign, _ := CreateSnapshot(ctx, q, foreign, rForeign, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/foreign.md", rForeign, "t")
+
+	unmaterialized, _ := UpsertSource(ctx, q, "/src/unmaterialized.md", "/src/unmaterialized.md", "t")
+	rUnmaterialized, _ := FindOrCreateRevision(ctx, q, unmaterialized, "sha-none", 1, 1, "t")
+	CreateSnapshot(ctx, q, unmaterialized, rUnmaterialized, "2026-07-20", "t")
+
+	got, err := SelectAllWatchCandidates(ctx, q, "/vault-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("selected = %+v, want recent and older vault-a sources", got)
+	}
+	if got[0].CanonicalPath != "/src/older.md" || got[0].ContentSHA != "sha-old" {
+		t.Errorf("older candidate = %+v", got[0])
+	}
+	if got[1].CanonicalPath != "/src/recent.md" || got[1].SnapshotDate != "2026-07-20" || got[1].ContentSHA != "sha-20" {
+		t.Errorf("recent candidate = %+v", got[1])
+	}
+}

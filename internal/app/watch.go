@@ -2,13 +2,11 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"md2obs/internal/database"
-	"md2obs/internal/source"
 	"md2obs/internal/watcher"
 )
 
@@ -114,36 +112,15 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			d.logger().Error("watch activation has no registered source", "source", p)
 			return
 		}
-		canonical, _, err := source.Canonicalize(p)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return
-			}
-			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
-			return
-		}
-		if canonical != candidate.CanonicalPath {
-			err := fmt.Errorf("watch source identity changed: registered %s now resolves to %s", candidate.CanonicalPath, canonical)
-			d.logger().Error("watch activation import failed", "source", p, "err", err)
-			return
-		}
-		_, sha, err := source.ReadAndHash(canonical)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return
-			}
-			d.logger().Error("cannot inspect newly watched source", "source", p, "err", err)
-			return
-		}
-		if sha == candidate.ContentSHA {
-			return
-		}
-		res, err := ImportWatchedSource(ctx, d, candidate.Source, opts.OnVaultChange)
+		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange)
 		if err != nil {
 			d.logger().Error("watch activation import failed", "source", p, "err", err)
 			return
 		}
-		printResult(d.Out, res)
+		if outcome.Missing || outcome.Import == nil {
+			return
+		}
+		printResult(d.Out, *outcome.Import)
 	}
 
 	return watcher.Run(ctx, watcher.Options{

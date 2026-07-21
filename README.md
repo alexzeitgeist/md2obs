@@ -9,7 +9,8 @@ The vault copy is a dated, derived snapshot — an import journal, not a
 bidirectional sync. Nothing is ever discovered or imported automatically; the
 only way a file enters the vault is an explicit `md2obs FILE...` invocation
 (`md2obs import FILE...` is equivalent), or the watcher re-importing a file
-you already imported.
+you already imported. `md2obs refresh` can perform the same re-import check
+once for previously imported sources without starting a watcher.
 
 ## Install
 
@@ -52,6 +53,7 @@ database must not be placed inside the vault.
 ```console
 md2obs FILE...                         # import is the default command
 md2obs import FILE...
+md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs watch stop
@@ -83,6 +85,47 @@ deterministic 6-hex-digit hash suffix as the final fallback. Explicit
 `import` always overwrites the vault copy, including edits made in Obsidian.
 Generated filename components are capped at 255 bytes; overlong collision
 names are truncated on a UTF-8 boundary and retain the source hash.
+
+### refresh
+
+```console
+md2obs refresh                         # sources materialized today
+md2obs refresh --days 3                # today and the previous two days
+md2obs refresh --all                   # every source ever materialized here
+md2obs refresh --all --on-vault-change=preserve
+```
+
+`refresh` is a one-shot catch-up pass for sources already materialized in the
+configured vault. It uses the same vault-scoped candidate selection and pinned
+source identities as the watcher, hashes each selected source, and imports only
+sources whose current content differs from their selected snapshot. It never
+scans source directories or discovers unrelated Markdown files. Missing
+registered sources are counted in the summary but are not fatal; identity
+changes, read errors, and import failures are reported per source and make the
+command return a non-zero status after the remaining candidates are checked.
+
+`--days N` selects sources by the date of their materialization in this vault,
+not by an unobserved source change time. For example, a source last imported ten
+days ago is not selected by `--days 3` even if it changed yesterday. Use `--all`
+for catch-up after an unknown amount of downtime or after a filesystem
+notification overflow. `--days` and `--all` are mutually exclusive.
+
+Like the watcher, refresh defaults to `--on-vault-change=skip`; `preserve` and
+`overwrite` have the same meanings described below. The policy is evaluated
+only when the source changed. If the source still matches its selected
+snapshot, refresh does not inspect, restore, or overwrite an edited or deleted
+vault copy. It converges to the source's current content and cannot reconstruct
+intermediate versions that existed while no watcher was running; broader
+database-to-vault reconciliation belongs to a future repair operation.
+
+A completed pass notifies a running watcher once so sources newly materialized
+today can join its session. For managed startup, start the watcher first and
+then run refresh, minimizing the gap in which another source edit could occur:
+
+```console
+md2obs watch start --days 3
+md2obs refresh --all
+```
 
 ### watch
 
@@ -119,7 +162,8 @@ closing the small import-to-watch race; matching content causes no vault write
 and does not evaluate `--on-vault-change`. The watcher never scans directories,
 never imports unrelated files, and does no polling — idle, it consumes
 effectively no CPU. Bare `md2obs watch` remains a foreground command; stop it
-with Ctrl-C.
+with Ctrl-C. Run `md2obs refresh` when startup should be followed by an explicit
+one-shot source catch-up.
 
 `watch start` runs the same watcher in a detached background session on Linux
 or macOS. The starting command waits until the initial database selection and
@@ -262,7 +306,8 @@ For anything you want to keep, duplicate the note into a normal folder
   through a symlink to a different file. Restore the original path or import
   the new target explicitly.
 - **`notification queue overflowed`** — source changes or new enrollments may
-  have been lost; re-run `md2obs import` on the affected files.
+  have been lost; run `md2obs refresh --all`, or re-run `md2obs import` on the
+  affected files if they are known.
 - **Import warns that running watchers may need to be restarted** — the import
   itself committed, but its cross-process watcher notification failed. Run
   `md2obs watch restart`, or fix the reported state-directory error and

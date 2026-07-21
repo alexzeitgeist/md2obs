@@ -23,6 +23,12 @@ func TestParseCommand(t *testing.T) {
 	}{
 		{"import", "import", []string{"one.md", "two.md"}, ""},
 		{"import missing file", "import", nil, "usage: md2obs import FILE"},
+		{"refresh", "refresh", nil, ""},
+		{"refresh all", "refresh", []string{"--all", "--on-vault-change=preserve"}, ""},
+		{"refresh positional", "refresh", []string{"extra"}, "usage: md2obs refresh"},
+		{"refresh all and days", "refresh", []string{"--all", "--days=2"}, "--all cannot be combined"},
+		{"refresh invalid days", "refresh", []string{"--days=0"}, "--days must be at least 1"},
+		{"refresh invalid policy", "refresh", []string{"--on-vault-change=bogus"}, "invalid --on-vault-change"},
 		{"watch", "watch", []string{"--days", "3", "--debounce", "750ms", "--on-vault-change=preserve"}, ""},
 		{"watch start", "watch", []string{"start", "--log", "--days", "3"}, ""},
 		{"watch stop", "watch", []string{"stop"}, ""},
@@ -55,6 +61,26 @@ func TestParseCommand(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestParseRefreshOptions(t *testing.T) {
+	got, err := parseCommand("refresh", []string{"--all", "--on-vault-change=preserve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := app.RefreshOptions{All: true, OnVaultChange: app.PolicyPreserve}
+	if got.refresh != want {
+		t.Fatalf("refresh options = %+v, want %+v", got.refresh, want)
+	}
+
+	defaults, err := parseCommand("refresh", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefaults := app.RefreshOptions{Days: 1, OnVaultChange: app.PolicySkip}
+	if defaults.refresh != wantDefaults {
+		t.Fatalf("refresh defaults = %+v, want %+v", defaults.refresh, wantDefaults)
 	}
 }
 
@@ -114,6 +140,22 @@ func TestRunCommandHelp(t *testing.T) {
 	}
 	if strings.Contains(stdout, "md2obs watch status") {
 		t.Errorf("watch help still advertises the removed status subcommand:\n%s", stdout)
+	}
+}
+
+func TestRunRefreshHelp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	code, stdout, stderr := captureRun(t, []string{"refresh", "-h"})
+	if code != 0 || stderr != "" {
+		t.Fatalf("refresh help = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"md2obs refresh", "--days", "--all", "--on-vault-change"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
+		}
 	}
 }
 
