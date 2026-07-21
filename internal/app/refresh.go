@@ -38,7 +38,8 @@ func (o RefreshOptions) Validate() error {
 
 // RunRefresh performs a one-shot source catch-up for candidates materialized
 // in the configured vault. Missing registered sources are reported in the
-// summary but are not failures, allowing a later recreation to be reconciled.
+// summary but are not failures, allowing a later source recreation to be
+// picked up by the watcher or another refresh.
 func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 	if err := opts.Validate(); err != nil {
 		return err

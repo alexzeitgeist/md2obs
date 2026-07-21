@@ -10,8 +10,8 @@ import (
 const notificationSuffix = ".watch-notify"
 
 // NotificationPath is the private cross-process wake-up file associated with
-// one state database. SQLite remains the source of truth; its contents are
-// deliberately opaque.
+// one state database. SQLite remains authoritative for watch membership; the
+// notification contents are deliberately opaque.
 func NotificationPath(databasePath string) string {
 	return databasePath + notificationSuffix
 }

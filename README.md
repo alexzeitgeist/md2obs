@@ -117,9 +117,9 @@ materialization for today's snapshot in this vault. When catch-up creates a new
 dated snapshot, earlier vault copies — including edits — remain untouched and
 are not treated as conflicts. If the source still matches its selected
 snapshot, refresh does not inspect, restore, or overwrite an edited or deleted
-vault copy. It converges to the source's current content and cannot reconstruct
-intermediate versions that existed while no watcher was running; broader
-database-to-vault reconciliation belongs to a future repair operation.
+vault copy. This is intentional: refresh catches up source changes; it does not
+audit historical vault materializations or reconstruct intermediate versions
+that existed while no watcher was running.
 
 A completed pass notifies a running watcher once so sources newly materialized
 today can join its session. For managed startup, start the watcher first and
@@ -231,13 +231,14 @@ relevant filesystem event.
 
 ### list / history / status
 
-`list` shows each source with its latest snapshot (`content: stale` means
-the database intends a newer revision than the vault file actually contains,
-e.g. after a skipped conflict). `history FILE` shows all dated snapshots for
-one source. `status` shows configuration, database location, schema version,
-counts, and active-watcher state. `list` and `history` are database queries
-only; status also inspects and, when necessary, cleans the active watcher
-record.
+`list` shows each source with its latest snapshot. `content: stale` means that
+the snapshot references a different revision from the last revision md2obs
+recorded writing at that path, for example after a skipped conflict. It is a
+database-state label, not the result of inspecting the current vault file.
+`history FILE` shows all dated snapshots for one source. `status` shows
+configuration, database location, schema version, counts, and active-watcher
+state. `list` and `history` are database queries only; status also inspects and,
+when necessary, cleans the active watcher record.
 
 ## Path safety
 
@@ -315,6 +316,12 @@ For anything you want to keep, duplicate the note into a normal folder
   itself committed, but its cross-process watcher notification failed. Run
   `md2obs watch restart`, or fix the reported state-directory error and
   re-import.
+- **Import reports a database or commit failure** — the vault and SQLite cannot
+  commit atomically, so a successful vault write may outlive a later database
+  failure. Re-run the same import to converge on the current source content.
+- **A dated vault copy was deleted** — re-run an explicit import to materialize
+  the current source for today. md2obs does not archive revision contents or
+  reconstruct deleted historical snapshots.
 - **A file was imported under a `--project--…` name you didn't expect** —
   another source with the same basename already owns the plain name for that
   date; see `md2obs list`.
@@ -330,12 +337,15 @@ tests first (see `internal/materialize/replace.go`).
 
 ## Design
 
-The full design rationale lives in `md2obs-implementation-plan.md`. Short
-version: SQLite (source → revision → snapshot → materialization) is the
-operational source of truth; vault paths are derived, replaceable
-materialization details; and the watcher reacts only to exact registered
-source identities. The physical replacement occurs inside the SQLite
-transaction, so a failed physical write rolls back database changes. SQLite
-and the filesystem cannot commit atomically, however: a database failure after
-a successful rename can leave the vault ahead until a later import or a future
-`repair` command reconciles it.
+SQLite records operational registry and materialization metadata
+(source → revision → snapshot → materialization), while the original file
+remains the content source of truth. Vault paths are derived, replaceable
+materialization details, and the watcher reacts only to exact registered source
+identities.
+
+The physical replacement occurs inside the SQLite transaction, so a failed
+physical write rolls back database changes. SQLite and the filesystem cannot
+commit atomically, however: a database failure after a successful rename can
+leave the vault ahead of the recorded state. Imports are safe to retry and
+converge on the source's current content. md2obs does not retain revision bytes
+or guarantee reconstruction of deleted historical snapshots.

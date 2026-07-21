@@ -8,7 +8,7 @@ import (
 )
 
 // Materialization records where a snapshot was physically written inside a
-// vault, and which revision that write actually contained.
+// vault and which revision md2obs recorded in its most recent successful write.
 type Materialization struct {
 	ID                int64
 	SnapshotID        int64

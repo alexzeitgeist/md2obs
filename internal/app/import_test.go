@@ -408,7 +408,7 @@ func TestVaultEditPolicies(t *testing.T) {
 			t.Errorf("edited vault copy overwritten: %q", got)
 		}
 		// The snapshot records the new revision as intent while
-		// written_revision_id still describes the stale file.
+		// written_revision_id still identifies md2obs's last recorded write.
 		q := env.deps.DB.Query()
 		srcRow, err := database.GetSourceByPath(ctx, q, src)
 		if err != nil || srcRow == nil {

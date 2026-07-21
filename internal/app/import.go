@@ -99,8 +99,9 @@ func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Sourc
 
 // importFile resolves and hashes a source, updates its revision and snapshot
 // facts, applies the vault-change policy, atomically materializes the content,
-// and commits the database transaction. As documented in plan §12, a later
-// database failure cannot roll back a physical rename that already succeeded.
+// and commits the database transaction. A successful physical rename can
+// outlive a later database failure; retrying the import converges on the
+// source's current content.
 func importFile(ctx context.Context, d *Deps, file string, policy Policy, registered *database.Source) (Result, error) {
 	canonical, display, err := source.Canonicalize(file)
 	if err != nil {
@@ -216,8 +217,9 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 				switch policy {
 				case PolicySkip:
 					// Record the observed revision as today's intent but do
-					// not touch the edited file. written_revision_id keeps
-					// describing the stale materialization accurately.
+					// not touch the edited file. written_revision_id continues
+					// to identify the last revision md2obs recorded as written;
+					// it is not a claim about the current edited bytes.
 					if snap.RevisionID != revID {
 						if err := database.UpdateSnapshotRevision(ctx, tx, snap.ID, revID, nowUTC); err != nil {
 							return Result{}, fmt.Errorf("import %s: %w", display, err)
@@ -340,8 +342,8 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 	return "", fmt.Errorf("no available destination filename for %s", canonical)
 }
 
-// printResult renders one import result in the plan's output format, with
-// the arrow aligned under the status word.
+// printResult renders one import result with the arrow aligned under the
+// status word.
 func printResult(w io.Writer, res Result) {
 	switch res.Status {
 	case StatusUnchanged:

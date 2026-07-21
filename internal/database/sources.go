@@ -72,7 +72,9 @@ type ListEntry struct {
 	DisplayPath  string
 	SnapshotDate string
 	RelativePath sql.NullString
-	Current      bool
+	// Current compares database intent with the last recorded write; it does
+	// not describe a live filesystem check.
+	Current bool
 }
 
 // ListSources returns every source with its most recent snapshot and, when
