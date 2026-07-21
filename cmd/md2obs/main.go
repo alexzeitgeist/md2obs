@@ -27,7 +27,6 @@ Usage:
   md2obs import FILE...
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
-  md2obs watch status
   md2obs watch stop
   md2obs watch restart [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs list
@@ -42,7 +41,7 @@ Commands:
            the initial window) and enroll later imports while running.
            Re-import watched sources when they change.
            start runs one managed watcher for this database and vault in the
-           background. status, stop, and restart manage that instance.
+           background. stop and restart manage that instance.
            Managed watcher output is discarded unless --log is specified.
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
@@ -68,7 +67,6 @@ the source content if the vault copy was edited.
 	"watch": `Usage:
   md2obs watch [OPTIONS]
   md2obs watch start [OPTIONS]
-  md2obs watch status
   md2obs watch stop
   md2obs watch restart [OPTIONS]
 
@@ -83,7 +81,6 @@ Options:
 
 Managed watcher commands:
   start                       Start one background watcher (Linux and macOS)
-  status                      Report whether the managed watcher is running
   stop                        Send SIGTERM and wait for a graceful exit
   restart                     Stop the managed watcher, then start it again
   --log                       On start/restart, log output beside the database
@@ -165,14 +162,6 @@ func run(args []string) int {
 
 	if command == "watch" && !isDaemonChild() {
 		switch options.watchAction {
-		case watchStatus:
-			state, err := inspectManagedWatch(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
-				return 1
-			}
-			fmt.Fprintln(os.Stdout, formatManagedWatchStatus(state))
-			return 0
 		case watchStop:
 			return runWatchStop(ctx, cfg)
 		case watchRestart:
@@ -258,7 +247,6 @@ type watchAction uint8
 const (
 	watchForeground watchAction = iota
 	watchStart
-	watchStatus
 	watchStop
 	watchRestart
 )
@@ -303,10 +291,8 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			case "start":
 				options.watchAction = watchStart
 				args = args[1:]
-			case "status":
-				return parseWatchLifecycleCommand(options, watchStatus, args[1:])
 			case "stop":
-				return parseWatchLifecycleCommand(options, watchStop, args[1:])
+				return parseWatchStopCommand(options, args[1:])
 			case "restart":
 				options.watchAction = watchRestart
 				args = args[1:]
@@ -324,7 +310,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs watch [start|status|stop|restart] [OPTIONS]")
+			return options, fmt.Errorf("usage: md2obs watch [start|stop|restart] [OPTIONS]")
 		}
 		policy, err := app.ParsePolicy(*policyFlag)
 		if err != nil {
@@ -378,18 +364,14 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 	return options, fmt.Errorf("unhandled command %q", command)
 }
 
-func parseWatchLifecycleCommand(options commandOptions, action watchAction, args []string) (commandOptions, error) {
-	options.watchAction = action
+func parseWatchStopCommand(options commandOptions, args []string) (commandOptions, error) {
+	options.watchAction = watchStop
 	fs := commandFlagSet("watch")
 	if err := fs.Parse(args); err != nil {
 		return options, err
 	}
 	if fs.NArg() != 0 {
-		name := "status"
-		if action == watchStop {
-			name = "stop"
-		}
-		return options, fmt.Errorf("usage: md2obs watch %s", name)
+		return options, fmt.Errorf("usage: md2obs watch stop")
 	}
 	return options, nil
 }

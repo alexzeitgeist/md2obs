@@ -54,7 +54,6 @@ md2obs FILE...                         # import is the default command
 md2obs import FILE...
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs watch start [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
-md2obs watch status
 md2obs watch stop
 md2obs watch restart [--log] [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs list
@@ -95,7 +94,7 @@ md2obs watch --on-vault-change=preserve
 
 md2obs watch start --days 3          # start the managed background watcher
 md2obs watch start --log             # append output beside the state database
-md2obs watch status                  # show its PID and start time
+md2obs status                        # includes managed watcher state
 md2obs watch stop                    # SIGTERM, then wait for graceful exit
 md2obs watch restart                 # preserve the running watcher's settings
 ```
@@ -134,7 +133,8 @@ created. Add `--log` to append standard output and errors to
 $ md2obs watch start --log --days 3
 Started md2obs watch daemon (PID 12345)
 Log: /home/alex/.local/share/md2obs/state.db.watch.log
-$ md2obs watch status
+$ md2obs status
+...
 Watch daemon:      running (PID 12345, started 2026-07-21T10:15:00+02:00)
 $ md2obs watch stop
 Stopped md2obs watch daemon (PID 12345)
@@ -184,9 +184,9 @@ relevant filesystem event.
 the database intends a newer revision than the vault file actually contains,
 e.g. after a skipped conflict). `history FILE` shows all dated snapshots for
 one source. `status` shows configuration, database location, schema version,
-counts, and the same managed-watcher state as `watch status`. `list` and
-`history` are database queries only; status also inspects and, when necessary,
-cleans the managed watcher record.
+counts, and managed-watcher state. `list` and `history` are database queries
+only; status also inspects and, when necessary, cleans the managed watcher
+record.
 
 ## Path safety
 

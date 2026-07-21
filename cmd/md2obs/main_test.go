@@ -25,13 +25,12 @@ func TestParseCommand(t *testing.T) {
 		{"import missing file", "import", nil, "usage: md2obs import FILE"},
 		{"watch", "watch", []string{"--days", "3", "--debounce", "750ms", "--on-vault-change=preserve"}, ""},
 		{"watch start", "watch", []string{"start", "--log", "--days", "3"}, ""},
-		{"watch status", "watch", []string{"status"}, ""},
 		{"watch stop", "watch", []string{"stop"}, ""},
 		{"watch restart", "watch", []string{"restart", "--debounce=1s"}, ""},
 		{"watch positional", "watch", []string{"extra"}, "usage: md2obs watch"},
 		{"watch removed daemon flag", "watch", []string{"--daemon"}, "flag provided but not defined"},
+		{"watch removed status command", "watch", []string{"status"}, "usage: md2obs watch"},
 		{"watch log only managed", "watch", []string{"--log"}, "flag provided but not defined"},
-		{"watch status options", "watch", []string{"status", "--days=2"}, "flag provided but not defined"},
 		{"watch stop positional", "watch", []string{"stop", "extra"}, "usage: md2obs watch stop"},
 		{"watch invalid days", "watch", []string{"--days", "0"}, "--days must be at least 1"},
 		{"watch invalid debounce", "watch", []string{"--debounce", "0s"}, "--debounce must be positive"},
@@ -112,6 +111,9 @@ func TestRunCommandHelp(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
+	}
+	if strings.Contains(stdout, "md2obs watch status") {
+		t.Errorf("watch help still advertises the removed status subcommand:\n%s", stdout)
 	}
 }
 
@@ -197,7 +199,7 @@ func TestRunWatchDaemonReportsOptInLog(t *testing.T) {
 	}
 }
 
-func TestRunWatchLifecycleReportsStoppedWithoutOpeningDatabase(t *testing.T) {
+func TestRunWatchStopWhenStoppedDoesNotOpenDatabase(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
 	if err := os.Mkdir(vault, 0o755); err != nil {
@@ -209,23 +211,15 @@ func TestRunWatchLifecycleReportsStoppedWithoutOpeningDatabase(t *testing.T) {
 	t.Setenv("MD2OBS_STATE_DB", stateDB)
 	t.Setenv(daemonChildEnv, "")
 
-	code, stdout, stderr := captureRun(t, []string{"watch", "status"})
-	if code != 0 || stderr != "" {
-		t.Fatalf("watch status = %d, stderr = %q", code, stderr)
-	}
-	if !strings.Contains(stdout, "Watch daemon:") || !strings.Contains(stdout, "stopped") {
-		t.Fatalf("watch status output = %q", stdout)
-	}
-	if _, err := os.Stat(stateDB); !os.IsNotExist(err) {
-		t.Fatalf("watch status unexpectedly opened state database: %v", err)
-	}
-
-	code, stdout, stderr = captureRun(t, []string{"watch", "stop"})
+	code, stdout, stderr := captureRun(t, []string{"watch", "stop"})
 	if code != 0 || stderr != "" {
 		t.Fatalf("watch stop = %d, stderr = %q", code, stderr)
 	}
 	if !strings.Contains(stdout, "No md2obs watch daemon is running") {
 		t.Fatalf("watch stop output = %q", stdout)
+	}
+	if _, err := os.Stat(stateDB); !os.IsNotExist(err) {
+		t.Fatalf("watch stop unexpectedly opened state database: %v", err)
 	}
 }
 
