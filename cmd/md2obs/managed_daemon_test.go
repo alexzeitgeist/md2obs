@@ -21,6 +21,7 @@ const (
 	managedHelperModeEnv  = "MD2OBS_MANAGED_HELPER_MODE"
 	managedHelperDBEnv    = "MD2OBS_MANAGED_HELPER_DB"
 	managedHelperVaultEnv = "MD2OBS_MANAGED_HELPER_VAULT"
+	foregroundHelperEnv   = "MD2OBS_FOREGROUND_HELPER"
 )
 
 // TestManagedWatchHelperProcess owns a real lease in a subprocess so stop can
@@ -37,7 +38,7 @@ func TestManagedWatchHelperProcess(t *testing.T) {
 	if mode == "ignore" {
 		signal.Ignore(syscall.SIGTERM)
 	}
-	_, release, err := claimManagedWatch(cfg, testManagedSettings())
+	_, release, err := claimManagedWatch(cfg, watchModeManaged, testManagedSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +53,20 @@ func TestManagedWatchHelperProcess(t *testing.T) {
 	<-terminated
 }
 
+// TestForegroundWatchHelperProcess runs the real foreground command in a
+// subprocess so its lease and SIGTERM cleanup can be tested end to end.
+func TestForegroundWatchHelperProcess(t *testing.T) {
+	if os.Getenv(foregroundHelperEnv) != "1" {
+		return
+	}
+	if code := run([]string{"watch"}); code != 0 {
+		t.Fatalf("foreground watch exit code = %d", code)
+	}
+}
+
 func TestManagedWatchLeaseRejectsDuplicatesAndCleansUp(t *testing.T) {
 	cfg := testManagedConfig(t)
-	record, release, err := claimManagedWatch(cfg, testManagedSettings())
+	record, release, err := claimManagedWatch(cfg, watchModeManaged, testManagedSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +77,12 @@ func TestManagedWatchLeaseRejectsDuplicatesAndCleansUp(t *testing.T) {
 		}
 	})
 
-	if record.PID != os.Getpid() || record.InstanceID == "" || record.ProcessIdentity == "" || record.StartedAt.IsZero() {
+	if record.Version != managedWatchRecordVersion ||
+		record.Mode != watchModeManaged ||
+		record.PID != os.Getpid() ||
+		record.InstanceID == "" ||
+		record.ProcessIdentity == "" ||
+		record.StartedAt.IsZero() {
 		t.Fatalf("incomplete managed record: %+v", record)
 	}
 	state, err := inspectManagedWatch(cfg)
@@ -75,8 +92,11 @@ func TestManagedWatchLeaseRejectsDuplicatesAndCleansUp(t *testing.T) {
 	if !state.Running || state.Record.InstanceID != record.InstanceID {
 		t.Fatalf("managed state = %+v, want running instance %s", state, record.InstanceID)
 	}
+	if got := formatWatchStatus(state); !strings.Contains(got, "running as daemon") {
+		t.Fatalf("managed status = %q", got)
+	}
 
-	if _, duplicateRelease, err := claimManagedWatch(cfg, testManagedSettings()); err == nil {
+	if _, duplicateRelease, err := claimManagedWatch(cfg, watchModeManaged, testManagedSettings()); err == nil {
 		if duplicateRelease != nil {
 			duplicateRelease()
 		}
@@ -107,7 +127,7 @@ func TestManagedWatchLeaseRejectsDuplicatesAndCleansUp(t *testing.T) {
 	}
 }
 
-func TestConcurrentManagedWatchClaimsHaveOneWinner(t *testing.T) {
+func TestConcurrentWatchClaimsAcrossModesHaveOneWinner(t *testing.T) {
 	cfg := testManagedConfig(t)
 	const contenders = 8
 	type result struct {
@@ -116,12 +136,16 @@ func TestConcurrentManagedWatchClaimsHaveOneWinner(t *testing.T) {
 	}
 	start := make(chan struct{})
 	results := make(chan result, contenders)
-	for range contenders {
-		go func() {
+	for contender := range contenders {
+		mode := watchModeManaged
+		if contender%2 == 0 {
+			mode = watchModeForeground
+		}
+		go func(mode watchInstanceMode) {
 			<-start
-			_, release, err := claimManagedWatch(cfg, testManagedSettings())
+			_, release, err := claimManagedWatch(cfg, mode, testManagedSettings())
 			results <- result{release: release, err: err}
-		}()
+		}(mode)
 	}
 	close(start)
 
@@ -147,6 +171,72 @@ func TestConcurrentManagedWatchClaimsHaveOneWinner(t *testing.T) {
 	winnerRelease()
 }
 
+func TestForegroundWatchUsesSharedLeaseAndRefusesRemoteStop(t *testing.T) {
+	cfg := testManagedConfig(t)
+	cmd, done := startForegroundHelper(t, cfg)
+	state := waitForManagedHelper(t, cfg)
+	if state.Record.Mode != watchModeForeground {
+		t.Fatalf("foreground helper mode = %q", state.Record.Mode)
+	}
+	if got := formatWatchStatus(state); !strings.Contains(got, "running in foreground") {
+		t.Fatalf("foreground status = %q", got)
+	}
+
+	if _, release, err := claimManagedWatch(cfg, watchModeManaged, testManagedSettings()); err == nil {
+		release()
+		t.Fatal("managed watcher acquired a foreground watcher's lease")
+	} else if !strings.Contains(err.Error(), "running in foreground") {
+		t.Fatalf("managed claim conflict = %v", err)
+	}
+
+	_, stopped, err := stopManagedWatch(context.Background(), cfg, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "stop it with Ctrl-C") {
+		t.Fatalf("foreground stop error = %v", err)
+	}
+	if stopped {
+		t.Fatal("foreground watcher reported remotely stopped")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("foreground helper exit: %v", err)
+	}
+	state, err = inspectManagedWatch(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Running {
+		t.Fatalf("foreground lease remained after SIGTERM: %+v", state)
+	}
+}
+
+func TestReadLegacyManagedRecordDefaultsToManagedMode(t *testing.T) {
+	cfg := testManagedConfig(t)
+	record, err := newManagedWatchRecord(cfg, watchModeManaged, testManagedSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Version = legacyManagedWatchRecordVersion
+	record.Mode = ""
+	path := filepath.Join(t.TempDir(), "legacy-watch.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := writeManagedWatchRecord(file, record); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := readManagedWatchRecord(file, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Mode != watchModeManaged {
+		t.Fatalf("legacy record mode = %q, want managed", decoded.Mode)
+	}
+}
+
 func TestManagedWatchScopesLeaseByDatabaseAndVault(t *testing.T) {
 	cfgA := testManagedConfig(t)
 	cfgB := *cfgA
@@ -158,12 +248,12 @@ func TestManagedWatchScopesLeaseByDatabaseAndVault(t *testing.T) {
 		t.Fatal("different vaults sharing a database received the same lease path")
 	}
 
-	_, releaseA, err := claimManagedWatch(cfgA, testManagedSettings())
+	_, releaseA, err := claimManagedWatch(cfgA, watchModeManaged, testManagedSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer releaseA()
-	_, releaseB, err := claimManagedWatch(&cfgB, testManagedSettings())
+	_, releaseB, err := claimManagedWatch(&cfgB, watchModeManaged, testManagedSettings())
 	if err != nil {
 		t.Fatalf("second scope could not acquire an independent lease: %v", err)
 	}
@@ -194,7 +284,7 @@ func TestInspectManagedWatchRemovesStaleRecord(t *testing.T) {
 
 func TestInspectManagedWatchRejectsChangedProcessIdentity(t *testing.T) {
 	cfg := testManagedConfig(t)
-	record, release, err := claimManagedWatch(cfg, testManagedSettings())
+	record, release, err := claimManagedWatch(cfg, watchModeManaged, testManagedSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +399,52 @@ func startManagedHelper(t *testing.T, cfg *config.Config, mode string) (*exec.Cm
 		}
 	})
 	return cmd, done
+}
+
+func startForegroundHelper(t *testing.T, cfg *config.Config) (*exec.Cmd, <-chan error) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestForegroundWatchHelperProcess$")
+	outputPath := filepath.Join(t.TempDir(), "foreground-helper.log")
+	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { output.Close() })
+	cmd.Stdout = output
+	cmd.Stderr = output
+	cmd.Env = append(os.Environ(),
+		foregroundHelperEnv+"=1",
+		"MD2OBS_STATE_DB="+cfg.StateDBPath,
+		"MD2OBS_VAULT="+cfg.VaultAbs,
+		daemonChildEnv+"=",
+		managedHelperModeEnv+"=",
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		contents, _ := os.ReadFile(outputPath)
+		if strings.Contains(string(contents), "Watching ") {
+			return cmd, done
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	contents, _ := os.ReadFile(outputPath)
+	t.Fatalf("foreground helper did not become ready; output:\n%s", contents)
+	return nil, nil
 }
 
 func waitForManagedHelper(t *testing.T, cfg *config.Config) managedWatchState {

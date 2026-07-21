@@ -95,7 +95,7 @@ Show dated snapshots for one explicitly imported source.
 `,
 	"status": `Usage: md2obs status
 
-Show configuration, database location, schema version, counts, and managed
+Show configuration, database location, schema version, counts, and active
 watcher state.
 `,
 }
@@ -146,15 +146,21 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 		return 1
 	}
-	var releaseManagedWatch func()
-	if command == "watch" && options.watchAction == watchStart && isDaemonChild() {
-		_, releaseManagedWatch, err = claimManagedWatch(cfg, managedSettings(options))
+	var releaseWatchLease func()
+	if command == "watch" && (options.watchAction == watchForeground || (options.watchAction == watchStart && isDaemonChild())) {
+		mode := watchModeForeground
+		if options.watchAction == watchStart {
+			mode = watchModeManaged
+		}
+		_, releaseWatchLease, err = claimManagedWatch(cfg, mode, managedSettings(options))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 			return 1
 		}
-		defer releaseManagedWatch()
-		fmt.Fprintf(os.Stdout, "Starting md2obs watch daemon (PID %d)\n", os.Getpid())
+		defer releaseWatchLease()
+		if mode == watchModeManaged {
+			fmt.Fprintf(os.Stdout, "Starting md2obs watch daemon (PID %d)\n", os.Getpid())
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -170,7 +176,7 @@ func run(args []string) int {
 				fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 				return 1
 			}
-			if state.Running && !options.watchSettingsSet {
+			if state.Running && state.Record.Mode == watchModeManaged && !options.watchSettingsSet {
 				applyManagedSettings(&options, state.Record.Settings)
 			}
 			if state.Running {
@@ -189,7 +195,7 @@ func run(args []string) int {
 			return 1
 		}
 		if state.Running {
-			fmt.Fprintf(os.Stderr, "md2obs: watch daemon is already running (PID %d)\n", state.Record.PID)
+			fmt.Fprintf(os.Stderr, "md2obs: %v\n", watchInstanceConflict(state.Record))
 			return 1
 		}
 		executable, err := os.Executable()
@@ -237,7 +243,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "md2obs: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, formatManagedWatchStatus(state))
+		fmt.Fprintln(os.Stdout, formatWatchStatus(state))
 	}
 	return 0
 }

@@ -242,7 +242,7 @@ func TestRunWatchStartRejectsRunningManagedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, release, err := claimManagedWatch(cfg, managedWatchSettings{
+	_, release, err := claimManagedWatch(cfg, watchModeManaged, managedWatchSettings{
 		Days:          1,
 		Debounce:      "500ms",
 		OnVaultChange: "skip",
@@ -268,6 +268,102 @@ func TestRunWatchStartRejectsRunningManagedInstance(t *testing.T) {
 	}
 }
 
+func TestRunWatchStartRejectsForegroundInstanceAndStatusReportsIt(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("watcher lease is supported only on Linux and macOS")
+	}
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateDB := filepath.Join(root, "state", "state.db")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("MD2OBS_VAULT", vault)
+	t.Setenv("MD2OBS_STATE_DB", stateDB)
+	t.Setenv(daemonChildEnv, "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := claimManagedWatch(cfg, watchModeForeground, managedWatchSettings{
+		Days:          1,
+		Debounce:      "500ms",
+		OnVaultChange: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	code, stdout, stderr := captureRun(t, []string{"status"})
+	if code != 0 || stderr != "" {
+		t.Fatalf("status = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "Watcher:") || !strings.Contains(stdout, "running in foreground") {
+		t.Fatalf("foreground status output = %q", stdout)
+	}
+
+	original := launchWatchDaemon
+	t.Cleanup(func() { launchWatchDaemon = original })
+	launchWatchDaemon = func(context.Context, string, []string, *config.Config, bool) (daemonProcess, error) {
+		t.Fatal("foreground conflict reached daemon launcher")
+		return daemonProcess{}, nil
+	}
+	code, stdout, stderr = captureRun(t, []string{"watch", "start"})
+	if code != 1 || stdout != "" {
+		t.Fatalf("start with foreground watcher = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	for _, want := range []string{"running in foreground", "PID", "Ctrl-C"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("foreground conflict does not contain %q: %q", want, stderr)
+		}
+	}
+
+	code, stdout, stderr = captureRun(t, []string{"watch", "restart"})
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "stop it with Ctrl-C") {
+		t.Fatalf("restart with foreground watcher = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+func TestRunForegroundWatchRejectsManagedInstance(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("watcher lease is supported only on Linux and macOS")
+	}
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("MD2OBS_VAULT", vault)
+	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
+	t.Setenv(daemonChildEnv, "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := claimManagedWatch(cfg, watchModeManaged, managedWatchSettings{
+		Days:          1,
+		Debounce:      "500ms",
+		OnVaultChange: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	code, stdout, stderr := captureRun(t, []string{"watch"})
+	if code != 1 || stdout != "" {
+		t.Fatalf("foreground watch with daemon = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "running as a daemon") || !strings.Contains(stderr, "PID") {
+		t.Fatalf("managed conflict stderr = %q", stderr)
+	}
+}
+
 func TestManagedWatchArgsAreCanonical(t *testing.T) {
 	options, err := parseCommand("watch", []string{"restart", "--days=4", "--debounce=1250ms", "--on-vault-change=overwrite", "--log"})
 	if err != nil {
@@ -280,7 +376,7 @@ func TestManagedWatchArgsAreCanonical(t *testing.T) {
 	}
 }
 
-func TestRunStatusIncludesManagedWatcherState(t *testing.T) {
+func TestRunStatusIncludesWatcherState(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
 	if err := os.Mkdir(vault, 0o755); err != nil {
@@ -295,7 +391,7 @@ func TestRunStatusIncludesManagedWatcherState(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("status = %d, stderr = %q", code, stderr)
 	}
-	for _, want := range []string{"Schema version:", "Watch daemon:", "stopped"} {
+	for _, want := range []string{"Schema version:", "Watcher:", "stopped"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("status output does not contain %q:\n%s", want, stdout)
 		}

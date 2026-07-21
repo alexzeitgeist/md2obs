@@ -28,7 +28,17 @@ type daemonProcess struct {
 	LogPath string
 }
 
-const managedWatchRecordVersion = 1
+const (
+	legacyManagedWatchRecordVersion = 1
+	managedWatchRecordVersion       = 2
+)
+
+type watchInstanceMode string
+
+const (
+	watchModeForeground watchInstanceMode = "foreground"
+	watchModeManaged    watchInstanceMode = "managed"
+)
 
 // managedWatchSettings are persisted with the instance so a bare restart can
 // preserve the settings of the running watcher.
@@ -40,11 +50,12 @@ type managedWatchSettings struct {
 }
 
 // managedWatchRecord is both the human-inspectable instance record and the
-// contents protected by the live daemon's lease. ProcessIdentity is an OS
+// contents protected by the live watcher's lease. ProcessIdentity is an OS
 // start marker; InstanceID identifies this particular acquisition of the
 // lease rather than merely a PID.
 type managedWatchRecord struct {
 	Version         int                  `json:"version"`
+	Mode            watchInstanceMode    `json:"mode"`
 	PID             int                  `json:"pid"`
 	InstanceID      string               `json:"instance_id"`
 	StartedAt       time.Time            `json:"started_at"`
@@ -107,18 +118,30 @@ func managedWatchArgs(options commandOptions) []string {
 	return args
 }
 
-func formatManagedWatchStatus(state managedWatchState) string {
+func formatWatchStatus(state managedWatchState) string {
 	if state.Unsupported {
-		return "Watch daemon:      unsupported on this platform"
+		return "Watcher:           state unavailable on this platform"
 	}
 	if !state.Running {
-		return "Watch daemon:      stopped"
+		return "Watcher:           stopped"
+	}
+	description := "running as daemon"
+	if state.Record.Mode == watchModeForeground {
+		description = "running in foreground"
 	}
 	return fmt.Sprintf(
-		"Watch daemon:      running (PID %d, started %s)",
+		"Watcher:           %s (PID %d, started %s)",
+		description,
 		state.Record.PID,
 		state.Record.StartedAt.Local().Format(time.RFC3339),
 	)
+}
+
+func watchInstanceConflict(record managedWatchRecord) error {
+	if record.Mode == watchModeForeground {
+		return fmt.Errorf("watcher is already running in foreground (PID %d); stop it with Ctrl-C", record.PID)
+	}
+	return fmt.Errorf("watcher is already running as a daemon (PID %d)", record.PID)
 }
 
 func runWatchStop(ctx context.Context, cfg *config.Config) int {
@@ -216,7 +239,7 @@ func startWatchDaemon(ctx context.Context, executable string, args []string, cfg
 			// preflight check but before this child acquired it. Surface that
 			// actionable result even when daemon logging is disabled.
 			if state, inspectErr := inspectManagedWatch(cfg); inspectErr == nil && state.Running && state.Record.PID != cmd.Process.Pid {
-				return daemonProcess{}, fmt.Errorf("watch daemon is already running (PID %d)", state.Record.PID)
+				return daemonProcess{}, watchInstanceConflict(state.Record)
 			}
 			if logPath != "" {
 				return daemonProcess{}, fmt.Errorf("watch daemon exited before becoming ready: %w (log: %s)", waitErr, logPath)

@@ -12,7 +12,12 @@ import (
 
 var errManagedWatchUnsupported = errors.New("managed watch commands are supported only on Linux and macOS")
 
-func claimManagedWatch(*config.Config, managedWatchSettings) (managedWatchRecord, func(), error) {
+func claimManagedWatch(_ *config.Config, mode watchInstanceMode, _ managedWatchSettings) (managedWatchRecord, func(), error) {
+	if mode == watchModeForeground {
+		// Keep the existing foreground watcher available on platforms where
+		// managed process control and its cross-process lease are unsupported.
+		return managedWatchRecord{}, func() {}, nil
+	}
 	return managedWatchRecord{}, nil, errManagedWatchUnsupported
 }
 

@@ -18,7 +18,7 @@ import (
 func managedProcessIdentity(pid int) (string, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if errors.Is(err, os.ErrNotExist) {
-		return "", errManagedProcessGone
+		return "", errWatchProcessGone
 	}
 	if err != nil {
 		return "", err
@@ -42,7 +42,7 @@ func managedProcessIdentity(pid int) (string, error) {
 func signalManagedProcess(record managedWatchRecord) error {
 	pidfd, err := unix.PidfdOpen(record.PID, 0)
 	if errors.Is(err, unix.ESRCH) {
-		return errManagedProcessGone
+		return errWatchProcessGone
 	}
 	if err == nil {
 		defer unix.Close(pidfd)
@@ -54,7 +54,7 @@ func signalManagedProcess(record managedWatchRecord) error {
 			return errors.New("process identity changed; refusing to signal reused PID")
 		}
 		if err := unix.PidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); errors.Is(err, unix.ESRCH) {
-			return errManagedProcessGone
+			return errWatchProcessGone
 		} else {
 			return err
 		}
@@ -73,7 +73,7 @@ func signalManagedProcess(record managedWatchRecord) error {
 		return errors.New("process identity changed; refusing to signal reused PID")
 	}
 	if err := unix.Kill(record.PID, unix.SIGTERM); errors.Is(err, unix.ESRCH) {
-		return errManagedProcessGone
+		return errWatchProcessGone
 	} else {
 		return err
 	}

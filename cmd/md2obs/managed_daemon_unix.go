@@ -21,17 +21,18 @@ import (
 	"md2obs/internal/config"
 )
 
-var errManagedProcessGone = errors.New("managed watch process no longer exists")
+var errWatchProcessGone = errors.New("watch process no longer exists")
 
-// managedWatchLeasePath scopes one managed process to the configured database
-// and resolved vault. A database shared by two vaults therefore gets two
-// independent leases without putting lifecycle files inside either vault.
+// managedWatchLeasePath scopes one foreground or managed watcher to the
+// configured database and resolved vault. A database shared by two vaults
+// therefore gets two independent leases without putting lifecycle files
+// inside either vault.
 func managedWatchLeasePath(cfg *config.Config) string {
 	scope := sha256.Sum256([]byte(cfg.StateDBPath + "\x00" + cfg.VaultAbs))
 	return fmt.Sprintf("%s.watch.%s.json", cfg.StateDBPath, hex.EncodeToString(scope[:12]))
 }
 
-func claimManagedWatch(cfg *config.Config, settings managedWatchSettings) (managedWatchRecord, func(), error) {
+func claimManagedWatch(cfg *config.Config, mode watchInstanceMode, settings managedWatchSettings) (managedWatchRecord, func(), error) {
 	path := managedWatchLeasePath(cfg)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return managedWatchRecord{}, nil, fmt.Errorf("create watch state directory: %w", err)
@@ -40,11 +41,11 @@ func claimManagedWatch(cfg *config.Config, settings managedWatchSettings) (manag
 	for attempt := 0; attempt < 4; attempt++ {
 		lease, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
-			return managedWatchRecord{}, nil, fmt.Errorf("open watch daemon record %s: %w", path, err)
+			return managedWatchRecord{}, nil, fmt.Errorf("open watcher record %s: %w", path, err)
 		}
 		if err := lease.Chmod(0o600); err != nil {
 			lease.Close()
-			return managedWatchRecord{}, nil, fmt.Errorf("secure watch daemon record %s: %w", path, err)
+			return managedWatchRecord{}, nil, fmt.Errorf("secure watcher record %s: %w", path, err)
 		}
 
 		err = unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB)
@@ -52,20 +53,20 @@ func claimManagedWatch(cfg *config.Config, settings managedWatchSettings) (manag
 			record, readErr := readManagedWatchRecordRetry(lease, cfg)
 			lease.Close()
 			if readErr != nil {
-				return managedWatchRecord{}, nil, fmt.Errorf("watch daemon lease is held but its record is invalid: %w", readErr)
+				return managedWatchRecord{}, nil, fmt.Errorf("watcher lease is held but its record is invalid: %w", readErr)
 			}
-			return managedWatchRecord{}, nil, fmt.Errorf("watch daemon is already running (PID %d)", record.PID)
+			return managedWatchRecord{}, nil, watchInstanceConflict(record)
 		}
 		if err != nil {
 			lease.Close()
-			return managedWatchRecord{}, nil, fmt.Errorf("lock watch daemon record %s: %w", path, err)
+			return managedWatchRecord{}, nil, fmt.Errorf("lock watcher record %s: %w", path, err)
 		}
 		if !leaseStillNamesPath(lease, path) {
 			lease.Close()
 			continue
 		}
 
-		record, err := newManagedWatchRecord(cfg, settings)
+		record, err := newManagedWatchRecord(cfg, mode, settings)
 		if err != nil {
 			lease.Close()
 			return managedWatchRecord{}, nil, err
@@ -85,7 +86,7 @@ func claimManagedWatch(cfg *config.Config, settings managedWatchSettings) (manag
 		}
 		return record, release, nil
 	}
-	return managedWatchRecord{}, nil, fmt.Errorf("watch daemon record %s changed repeatedly while acquiring its lease", path)
+	return managedWatchRecord{}, nil, fmt.Errorf("watcher record %s changed repeatedly while acquiring its lease", path)
 }
 
 func inspectManagedWatch(cfg *config.Config) (managedWatchState, error) {
@@ -97,7 +98,7 @@ func inspectManagedWatch(cfg *config.Config) (managedWatchState, error) {
 			return managedWatchState{}, nil
 		}
 		if err != nil {
-			return managedWatchState{}, fmt.Errorf("open watch daemon record %s: %w", path, err)
+			return managedWatchState{}, fmt.Errorf("open watcher record %s: %w", path, err)
 		}
 
 		err = unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB)
@@ -105,10 +106,10 @@ func inspectManagedWatch(cfg *config.Config) (managedWatchState, error) {
 			record, readErr := readManagedWatchRecordRetry(lease, cfg)
 			lease.Close()
 			if readErr != nil {
-				return managedWatchState{}, fmt.Errorf("watch daemon lease is held but its record is invalid: %w", readErr)
+				return managedWatchState{}, fmt.Errorf("watcher lease is held but its record is invalid: %w", readErr)
 			}
 			identity, identityErr := managedProcessIdentity(record.PID)
-			if errors.Is(identityErr, errManagedProcessGone) {
+			if errors.Is(identityErr, errWatchProcessGone) {
 				// The daemon exited between the lease check and process lookup.
 				// Retry so the now-unlocked stale record is cleaned normally.
 				time.Sleep(5 * time.Millisecond)
@@ -126,7 +127,7 @@ func inspectManagedWatch(cfg *config.Config) (managedWatchState, error) {
 		}
 		if err != nil {
 			lease.Close()
-			return managedWatchState{}, fmt.Errorf("inspect watch daemon lease %s: %w", path, err)
+			return managedWatchState{}, fmt.Errorf("inspect watcher lease %s: %w", path, err)
 		}
 		if !leaseStillNamesPath(lease, path) {
 			lease.Close()
@@ -143,7 +144,7 @@ func inspectManagedWatch(cfg *config.Config) (managedWatchState, error) {
 	if identityMismatch != nil {
 		return managedWatchState{}, identityMismatch
 	}
-	return managedWatchState{}, fmt.Errorf("watch daemon record %s changed repeatedly while inspecting it", path)
+	return managedWatchState{}, fmt.Errorf("watcher record %s changed repeatedly while inspecting it", path)
 }
 
 func stopManagedWatch(ctx context.Context, cfg *config.Config, timeout time.Duration) (managedWatchRecord, bool, error) {
@@ -154,9 +155,15 @@ func stopManagedWatch(ctx context.Context, cfg *config.Config, timeout time.Dura
 	if !state.Running {
 		return managedWatchRecord{}, false, nil
 	}
+	if state.Record.Mode == watchModeForeground {
+		return state.Record, false, fmt.Errorf(
+			"watcher PID %d is running in the foreground; stop it with Ctrl-C",
+			state.Record.PID,
+		)
+	}
 
 	err = signalManagedProcess(state.Record)
-	if err != nil && !errors.Is(err, errManagedProcessGone) {
+	if err != nil && !errors.Is(err, errWatchProcessGone) {
 		return state.Record, false, fmt.Errorf("stop watch daemon PID %d: %w", state.Record.PID, err)
 	}
 
@@ -194,17 +201,21 @@ func stopManagedWatch(ctx context.Context, cfg *config.Config, timeout time.Dura
 	}
 }
 
-func newManagedWatchRecord(cfg *config.Config, settings managedWatchSettings) (managedWatchRecord, error) {
+func newManagedWatchRecord(cfg *config.Config, mode watchInstanceMode, settings managedWatchSettings) (managedWatchRecord, error) {
+	if mode != watchModeForeground && mode != watchModeManaged {
+		return managedWatchRecord{}, fmt.Errorf("invalid watch instance mode %q", mode)
+	}
 	identity, err := managedProcessIdentity(os.Getpid())
 	if err != nil {
-		return managedWatchRecord{}, fmt.Errorf("identify watch daemon process: %w", err)
+		return managedWatchRecord{}, fmt.Errorf("identify watcher process: %w", err)
 	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return managedWatchRecord{}, fmt.Errorf("generate watch daemon instance ID: %w", err)
+		return managedWatchRecord{}, fmt.Errorf("generate watcher instance ID: %w", err)
 	}
 	return managedWatchRecord{
 		Version:         managedWatchRecordVersion,
+		Mode:            mode,
 		PID:             os.Getpid(),
 		InstanceID:      hex.EncodeToString(nonce),
 		StartedAt:       time.Now().UTC(),
@@ -218,20 +229,20 @@ func newManagedWatchRecord(cfg *config.Config, settings managedWatchSettings) (m
 func writeManagedWatchRecord(file *os.File, record managedWatchRecord) error {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode watch daemon record: %w", err)
+		return fmt.Errorf("encode watcher record: %w", err)
 	}
 	data = append(data, '\n')
 	if err := file.Truncate(0); err != nil {
-		return fmt.Errorf("reset watch daemon record: %w", err)
+		return fmt.Errorf("reset watcher record: %w", err)
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind watch daemon record: %w", err)
+		return fmt.Errorf("rewind watcher record: %w", err)
 	}
 	if _, err := file.Write(data); err != nil {
-		return fmt.Errorf("write watch daemon record: %w", err)
+		return fmt.Errorf("write watcher record: %w", err)
 	}
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("sync watch daemon record: %w", err)
+		return fmt.Errorf("sync watcher record: %w", err)
 	}
 	return nil
 }
@@ -261,7 +272,16 @@ func readManagedWatchRecord(file *os.File, cfg *config.Config) (managedWatchReco
 	if err := json.Unmarshal(data, &record); err != nil {
 		return managedWatchRecord{}, fmt.Errorf("decode record: %w", err)
 	}
-	if record.Version != managedWatchRecordVersion {
+	switch record.Version {
+	case legacyManagedWatchRecordVersion:
+		// Version 1 records predate foreground lease participation, so every
+		// live version 1 owner is necessarily a managed daemon.
+		record.Mode = watchModeManaged
+	case managedWatchRecordVersion:
+		if record.Mode != watchModeForeground && record.Mode != watchModeManaged {
+			return managedWatchRecord{}, fmt.Errorf("invalid watch instance mode %q", record.Mode)
+		}
+	default:
 		return managedWatchRecord{}, fmt.Errorf("unsupported record version %d", record.Version)
 	}
 	if record.PID <= 0 || record.InstanceID == "" || record.ProcessIdentity == "" || record.StartedAt.IsZero() {

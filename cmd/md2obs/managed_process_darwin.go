@@ -15,12 +15,12 @@ func managedProcessIdentity(pid int) (string, error) {
 	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		if errors.Is(err, unix.ESRCH) {
-			return "", errManagedProcessGone
+			return "", errWatchProcessGone
 		}
 		return "", err
 	}
 	if process == nil || process.Proc.P_pid != int32(pid) {
-		return "", errManagedProcessGone
+		return "", errWatchProcessGone
 	}
 	started := process.Proc.P_starttime
 	return fmt.Sprintf("%d:%d", started.Sec, started.Usec), nil
@@ -35,7 +35,7 @@ func signalManagedProcess(record managedWatchRecord) error {
 		return errors.New("process identity changed; refusing to signal reused PID")
 	}
 	if err := unix.Kill(record.PID, unix.SIGTERM); errors.Is(err, unix.ESRCH) {
-		return errManagedProcessGone
+		return errWatchProcessGone
 	} else {
 		return err
 	}

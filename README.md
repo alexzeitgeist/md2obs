@@ -94,7 +94,7 @@ md2obs watch --on-vault-change=preserve
 
 md2obs watch start --days 3          # start the managed background watcher
 md2obs watch start --log             # append output beside the state database
-md2obs status                        # includes managed watcher state
+md2obs status                        # includes active watcher state
 md2obs watch stop                    # SIGTERM, then wait for graceful exit
 md2obs watch restart                 # preserve the running watcher's settings
 ```
@@ -135,34 +135,38 @@ Started md2obs watch daemon (PID 12345)
 Log: /home/alex/.local/share/md2obs/state.db.watch.log
 $ md2obs status
 ...
-Watch daemon:      running (PID 12345, started 2026-07-21T10:15:00+02:00)
+Watcher:           running as daemon (PID 12345, started 2026-07-21T10:15:00+02:00)
 $ md2obs watch stop
 Stopped md2obs watch daemon (PID 12345)
 ```
 
-Exactly one managed instance is allowed for each resolved `(state database,
-vault)` pair. Concurrent or repeated `watch start` calls cannot create
-duplicates: the daemon holds an exclusive lease for its lifetime. Its durable
-record contains the PID, a random instance ID, kernel process-start identity,
-start time, scope, and watch settings. An unlocked record left by a crash or
-`SIGKILL` is stale and is removed by the next lifecycle command. The identity
+Exactly one watcher—foreground or managed—is allowed for each resolved
+`(state database, vault)` pair. Bare `watch` and `watch start` acquire the same
+exclusive lease, so concurrent starts and foreground/daemon overlap cannot
+create duplicate watchers. The durable record identifies the mode and contains
+the PID, a random instance ID, kernel process-start identity, start time,
+scope, and watch settings. An unlocked record left by a crash or `SIGKILL` is
+stale and is removed by the next watcher or lifecycle command. The identity
 check prevents `watch stop` from signaling an unrelated process if the stored
-PID has been reused.
+PID has been reused. `md2obs status` distinguishes `running in foreground`
+from `running as daemon`.
 
 `watch stop` sends `SIGTERM` and waits up to 10 seconds for the daemon to close
 its database and filesystem watches and release its lease. It reports a clear
-error if graceful shutdown times out; it never escalates to `SIGKILL`.
-`watch restart` stops and starts the instance. With no options it preserves the
-running instance's `--days`, `--debounce`, `--on-vault-change`, and `--log`
-settings. Supplying any option selects a new complete set, with defaults for
-the options not supplied. If no managed instance is running, `restart` starts
-one with the supplied settings or defaults.
+error if graceful shutdown times out; it never escalates to `SIGKILL`. If the
+active lease belongs to a foreground watcher, `watch stop` refuses to signal it
+and directs the user to stop that terminal with Ctrl-C.
+
+`watch restart` stops and starts the managed instance. With no options it
+preserves the running instance's `--days`, `--debounce`,
+`--on-vault-change`, and `--log` settings. Supplying any option selects a new
+complete set, with defaults for the options not supplied. If no watcher is
+running, `restart` starts a managed instance with the supplied settings or
+defaults.
 
 Each source identity is pinned when it is enrolled. If its path is replaced by
 a symlink to another file, the event is rejected and reported rather than
-registering or importing the new target. Foreground watcher processes remain
-independent of the managed lease, so users can still run one explicitly while
-the managed watcher is active; both may perform the same idempotent refresh.
+registering or importing the new target.
 
 `--on-vault-change` decides what happens when the vault copy was edited
 (for example on a phone, synced back) since md2obs last wrote it:
@@ -184,8 +188,8 @@ relevant filesystem event.
 the database intends a newer revision than the vault file actually contains,
 e.g. after a skipped conflict). `history FILE` shows all dated snapshots for
 one source. `status` shows configuration, database location, schema version,
-counts, and managed-watcher state. `list` and `history` are database queries
-only; status also inspects and, when necessary, cleans the managed watcher
+counts, and active-watcher state. `list` and `history` are database queries
+only; status also inspects and, when necessary, cleans the active watcher
 record.
 
 ## Path safety
