@@ -9,6 +9,10 @@ import (
 
 func TestWithinRoot(t *testing.T) {
 	root := t.TempDir()
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	good := []string{"a.md", "a/b.md", "a/./b.md", "_External/2026-07-20/x.md"}
 	for _, rel := range good {
@@ -17,7 +21,7 @@ func TestWithinRoot(t *testing.T) {
 			t.Errorf("WithinRoot(%q) rejected: %v", rel, err)
 			continue
 		}
-		if !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		if !strings.HasPrefix(abs, physicalRoot+string(filepath.Separator)) {
 			t.Errorf("WithinRoot(%q) = %q outside root", rel, abs)
 		}
 	}
@@ -43,6 +47,10 @@ func TestWithinRootRejectsSymlinkedAncestorOutsideRoot(t *testing.T) {
 
 func TestWithinRootAllowsSymlinkedAncestorInsideRoot(t *testing.T) {
 	root := t.TempDir()
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	realDir := filepath.Join(root, "real")
 	if err := os.Mkdir(realDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -54,7 +62,7 @@ func TestWithinRootAllowsSymlinkedAncestorInsideRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WithinRoot rejected an internal symlink: %v", err)
 	}
-	if got != filepath.Join(root, "redirect", "note.md") {
+	if got != filepath.Join(physicalRoot, "redirect", "note.md") {
 		t.Fatalf("destination = %q", got)
 	}
 }

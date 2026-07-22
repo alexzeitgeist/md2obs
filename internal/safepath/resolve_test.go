@@ -8,6 +8,10 @@ import (
 
 func TestResolveExistingAncestorThroughSymlink(t *testing.T) {
 	base := t.TempDir()
+	physicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
 	outside := filepath.Join(base, "outside")
 	if err := os.Mkdir(outside, 0o755); err != nil {
 		t.Fatal(err)
@@ -21,7 +25,7 @@ func TestResolveExistingAncestorThroughSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(outside, "missing", "file.md")
+	want := filepath.Join(physicalBase, "outside", "missing", "file.md")
 	if got != want {
 		t.Fatalf("resolved path = %q, want %q", got, want)
 	}
@@ -29,6 +33,10 @@ func TestResolveExistingAncestorThroughSymlink(t *testing.T) {
 
 func TestResolveExistingAncestorThroughDanglingSymlink(t *testing.T) {
 	base := t.TempDir()
+	physicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(base, "not-created", "state.db")
 	link := filepath.Join(base, "state-link.db")
 	if err := os.Symlink(target, link); err != nil {
@@ -39,8 +47,9 @@ func TestResolveExistingAncestorThroughDanglingSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != target {
-		t.Fatalf("resolved path = %q, want %q", got, target)
+	want := filepath.Join(physicalBase, "not-created", "state.db")
+	if got != want {
+		t.Fatalf("resolved path = %q, want %q", got, want)
 	}
 }
 

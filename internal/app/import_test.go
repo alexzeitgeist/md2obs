@@ -102,7 +102,11 @@ func writeSource(t *testing.T, dir, name, content string) string {
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return p
+	canonical, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func TestImportFirst(t *testing.T) {

@@ -192,10 +192,15 @@ func TestLoadFromFileAndEnv(t *testing.T) {
 	vault := t.TempDir()
 	dbDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", confHome)
+	t.Setenv("HOME", confHome)
 	t.Setenv("MD2OBS_STATE_DB", filepath.Join(dbDir, "state.db"))
 	t.Setenv("MD2OBS_VAULT", "")
 
-	dir := filepath.Join(confHome, "md2obs")
+	configPath, err := DefaultConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(configPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +209,7 @@ func TestLoadFromFileAndEnv(t *testing.T) {
 		"layout":         DefaultLayout,
 		"root_directory": "Imports",
 	})
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o644); err != nil {
+	if err := os.WriteFile(configPath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
