@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -580,6 +581,9 @@ func TestWatchMissingActivationIsSilentAndRecreationWorks(t *testing.T) {
 }
 
 func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("fsnotify's kqueue backend follows a replacement symlink and cannot observe the link's removal")
+	}
 	env := newTestEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
