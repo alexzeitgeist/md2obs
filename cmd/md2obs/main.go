@@ -31,9 +31,7 @@ Usage:
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs untrack FILE...
   md2obs untrack [--missing] [--older-than AGE] [--dry-run]
-  md2obs list
-  md2obs history FILE
-  md2obs status
+  md2obs debug COMMAND
 
 Commands:
   import   Import (or refresh) the named Markdown files into today's
@@ -52,9 +50,7 @@ Commands:
   untrack  Forget named sources in this vault, or select a batch by definite
            absence and/or materialization age. Database bookkeeping no other
            vault needs is collected; physical vault files are untouched.
-  list     List sources currently tracked in this vault.
-  history  Show retained snapshot diagnostics for one source.
-  status   Show configuration, database location, schema version, and counts.
+  debug    Inspect internal bookkeeping with list, history, and status.
 
 Configuration:
   Config file  ~/.config/md2obs/config.json (Linux)
@@ -111,20 +107,31 @@ Options:
                       example 30d or 365d)
   --dry-run           Report bookkeeping that would be forgotten or collected
 `,
-	"list": `Usage: md2obs list
+	"debug list": `Usage: md2obs debug list
 
 List sources currently tracked in the configured vault.
 `,
-	"history": `Usage: md2obs history FILE
+	"debug history": `Usage: md2obs debug history FILE
 
 Show retained snapshot diagnostics for one explicitly imported source. Entries
 are complete while the source remains tracked but may be collected by untrack.
 `,
-	"status": `Usage: md2obs status
+	"debug status": `Usage: md2obs debug status
 
 Show configuration, database location, schema version, and counts.
 `,
 }
+
+const debugUsage = `Usage:
+  md2obs debug list
+  md2obs debug history FILE
+  md2obs debug status
+
+Debug commands:
+  list     List sources currently tracked in this vault.
+  history  Show retained snapshot diagnostics for one source.
+  status   Show configuration, database location, schema version, and counts.
+`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -141,7 +148,28 @@ func run(args []string) int {
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
-	case "import", "refresh", "watch", "untrack", "list", "history", "status":
+	case "import", "refresh", "watch", "untrack":
+	case "debug":
+		if len(commandArgs) > 0 && isHelpArg(commandArgs[0]) {
+			fmt.Fprint(os.Stdout, debugUsage)
+			return 0
+		}
+		if len(commandArgs) == 0 {
+			fmt.Fprint(os.Stderr, debugUsage)
+			return 2
+		}
+		subcommand := commandArgs[0]
+		switch subcommand {
+		case "list", "history", "status":
+			command = "debug " + subcommand
+			commandArgs = commandArgs[1:]
+		default:
+			fmt.Fprintf(os.Stderr, "md2obs: unknown debug command %q\n\n%s", subcommand, debugUsage)
+			return 2
+		}
+	case "list", "history", "status":
+		fmt.Fprintf(os.Stderr, "md2obs: %s moved to 'md2obs debug %s'\n", command, command)
+		return 2
 	default:
 		command = "import"
 		commandArgs = args
@@ -209,6 +237,10 @@ func commandFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+func isHelpArg(arg string) bool {
+	return arg == "help" || arg == "-h" || arg == "--help"
 }
 
 // parseCommand validates all command syntax before configuration or SQLite is
@@ -317,34 +349,34 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		}
 		return options, nil
 
-	case "list":
-		fs := commandFlagSet("list")
+	case "debug list":
+		fs := commandFlagSet("debug list")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs list")
+			return options, fmt.Errorf("usage: md2obs debug list")
 		}
 		return options, nil
 
-	case "history":
-		fs := commandFlagSet("history")
+	case "debug history":
+		fs := commandFlagSet("debug history")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
 		if fs.NArg() != 1 {
-			return options, fmt.Errorf("usage: md2obs history FILE")
+			return options, fmt.Errorf("usage: md2obs debug history FILE")
 		}
 		options.historyFile = fs.Arg(0)
 		return options, nil
 
-	case "status":
-		fs := commandFlagSet("status")
+	case "debug status":
+		fs := commandFlagSet("debug status")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs status")
+			return options, fmt.Errorf("usage: md2obs debug status")
 		}
 		return options, nil
 	}
@@ -372,11 +404,11 @@ func dispatch(ctx context.Context, deps *app.Deps, command string, options comma
 		return app.RunWatch(ctx, deps, options.watch)
 	case "untrack":
 		return app.RunUntrack(ctx, deps, options.untrack)
-	case "list":
+	case "debug list":
 		return app.RunList(ctx, deps)
-	case "history":
+	case "debug history":
 		return app.RunHistory(ctx, deps, options.historyFile)
-	case "status":
+	case "debug status":
 		return app.RunStatus(ctx, deps)
 	default:
 		return fmt.Errorf("unhandled command %q", command)

@@ -98,7 +98,7 @@ func FindSourcesByPath(ctx context.Context, q Querier, path string) ([]Source, e
 	return sources, rows.Err()
 }
 
-// ListEntry is one row of `md2obs list`: a source with its latest snapshot.
+// ListEntry is one row of `md2obs debug list`: a source with its latest snapshot.
 type ListEntry struct {
 	DisplayPath  string
 	SnapshotDate string

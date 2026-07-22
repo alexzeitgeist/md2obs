@@ -59,9 +59,9 @@ md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
 md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
 md2obs untrack FILE...
 md2obs untrack [--missing] [--older-than AGE] [--dry-run]
-md2obs list
-md2obs history FILE
-md2obs status
+md2obs debug list
+md2obs debug history FILE
+md2obs debug status
 ```
 
 ### import
@@ -218,11 +218,11 @@ revision bookkeeping was forgotten, the same content can be copied into that
 new dated folder again.
 
 Named paths may be untracked whether they still exist or not. A path shown by
-`md2obs list` can be passed back to `untrack`, including a missing source that
-was originally imported through a symlink. Named and batch selection cannot be
-combined in one invocation. Named untrack is idempotent: a path that is not
-associated with the configured vault is reported as `not tracked` and the
-command still succeeds.
+`md2obs debug list` can be passed back to `untrack`, including a missing source
+that was originally imported through a symlink. Named and batch selection
+cannot be combined in one invocation. Named untrack is idempotent: a path that
+is not associated with the configured vault is reported as `not tracked` and
+the command still succeeds.
 
 `--missing` selects an exact source only when that path is absent and its
 immediate parent can be read. If the parent is missing or inaccessible, the
@@ -250,17 +250,18 @@ garbage-collects newly unreferenced bookkeeping. Vault files remain untouched.
 Copy `state.db` before upgrading if you need the old internal rows for
 diagnostics.
 
-### list / history / status
+### debug
 
-`list` shows sources currently tracked in the configured vault and their latest
-materialization there. `content: stale` means that the retained snapshot
-references a different revision from the last revision md2obs recorded writing
-at that path, for example after a skipped conflict. It is a database-state label,
-not the result of inspecting the current vault file. `history FILE` is a
-diagnostic view of retained dated snapshots; it is complete while a source
-remains tracked, but untrack may collect entries no other vault references.
-`status` shows configuration, database location, schema version, and working-set
-counts. All three are database queries only.
+The `debug` namespace exposes internal bookkeeping for diagnosis rather than
+the normal import workflow. `debug list` shows sources currently tracked in the
+configured vault and their latest materialization there. `content: stale` means
+that the retained snapshot references a different revision from the last
+revision md2obs recorded writing at that path, for example after a skipped
+conflict. It is a database-state label, not the result of inspecting the current
+vault file. `debug history FILE` shows retained dated snapshots; it is complete
+while a source remains tracked, but untrack may collect entries no other vault
+references. `debug status` shows configuration, database location, schema
+version, and working-set counts. All three are database queries only.
 
 ## Path safety
 
@@ -356,7 +357,7 @@ For anything you want to keep, duplicate the note into a normal folder
   reconstruct deleted historical snapshots.
 - **A file was imported under a `--project--…` name you didn't expect** —
   another source with the same basename already owns the plain name for that
-  date; see `md2obs list`.
+  date; see `md2obs debug list`.
 - **Database locked** — another md2obs process holds a write; retries wait
   up to 5 s (`busy_timeout`), so this normally resolves itself.
 

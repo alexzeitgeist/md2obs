@@ -44,12 +44,12 @@ func TestParseCommand(t *testing.T) {
 		{"untrack ambiguous selection", "untrack", []string{"--missing", "one.md"}, "source paths cannot be combined"},
 		{"untrack invalid age unit", "untrack", []string{"--older-than=24h"}, "invalid --older-than"},
 		{"untrack invalid zero age", "untrack", []string{"--older-than=0d"}, "invalid --older-than"},
-		{"list", "list", nil, ""},
-		{"list positional", "list", []string{"extra"}, "usage: md2obs list"},
-		{"history", "history", []string{"note.md"}, ""},
-		{"history missing", "history", nil, "usage: md2obs history"},
-		{"status", "status", nil, ""},
-		{"status positional", "status", []string{"extra"}, "usage: md2obs status"},
+		{"debug list", "debug list", nil, ""},
+		{"debug list positional", "debug list", []string{"extra"}, "usage: md2obs debug list"},
+		{"debug history", "debug history", []string{"note.md"}, ""},
+		{"debug history missing", "debug history", nil, "usage: md2obs debug history"},
+		{"debug status", "debug status", nil, ""},
+		{"debug status positional", "debug status", []string{"extra"}, "usage: md2obs debug status"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -181,6 +181,57 @@ func TestRunCommandHelp(t *testing.T) {
 	}
 }
 
+func TestRunDebugHelpBeforeLoadingConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	for _, args := range [][]string{{"debug", "-h"}, {"debug", "help"}, {"debug", "-h", "extra"}} {
+		code, stdout, stderr := captureRun(t, args)
+		if code != 0 || stderr != "" {
+			t.Fatalf("debug help %v = %d, stdout = %q, stderr = %q", args, code, stdout, stderr)
+		}
+		for _, want := range []string{"md2obs debug list", "md2obs debug history FILE", "md2obs debug status"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("debug help %v does not contain %q:\n%s", args, want, stdout)
+			}
+		}
+	}
+
+	code, stdout, stderr := captureRun(t, []string{"debug", "history", "-h"})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "Usage: md2obs debug history FILE") {
+		t.Fatalf("debug history help = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+func TestRunDebugUsageErrorsBeforeLoadingConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing subcommand", []string{"debug"}, "md2obs debug history FILE"},
+		{"unknown subcommand", []string{"debug", "unknown"}, `unknown debug command "unknown"`},
+		{"removed list", []string{"list"}, "list moved to 'md2obs debug list'"},
+		{"removed history", []string{"history", "note.md"}, "history moved to 'md2obs debug history'"},
+		{"removed status", []string{"status"}, "status moved to 'md2obs debug status'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := captureRun(t, tc.args)
+			if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("run %v = %d, stdout = %q, stderr = %q; want %q", tc.args, code, stdout, stderr, tc.want)
+			}
+			if strings.Contains(stderr, "no vault configured") {
+				t.Fatalf("configuration masked debug usage error: %q", stderr)
+			}
+		})
+	}
+}
+
 func TestRunRefreshHelp(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MD2OBS_VAULT", "")
@@ -213,7 +264,7 @@ func TestRunUntrackHelp(t *testing.T) {
 	}
 }
 
-func TestRunStatusReportsDatabaseStateOnly(t *testing.T) {
+func TestRunDebugStatusReportsDatabaseStateOnly(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
 	if err := os.Mkdir(vault, 0o755); err != nil {
@@ -223,7 +274,7 @@ func TestRunStatusReportsDatabaseStateOnly(t *testing.T) {
 	t.Setenv("MD2OBS_VAULT", vault)
 	t.Setenv("MD2OBS_STATE_DB", filepath.Join(root, "state", "state.db"))
 
-	code, stdout, stderr := captureRun(t, []string{"status"})
+	code, stdout, stderr := captureRun(t, []string{"debug", "status"})
 	if code != 0 || stderr != "" {
 		t.Fatalf("status = %d, stderr = %q", code, stderr)
 	}
@@ -294,11 +345,15 @@ func TestRunUntrackCommandUpdatesListState(t *testing.T) {
 	if code, _, stderr := captureRun(t, []string{source}); code != 0 {
 		t.Fatalf("import = %d, stderr = %q", code, stderr)
 	}
-	code, stdout, stderr := captureRun(t, []string{"untrack", source})
+	code, stdout, stderr := captureRun(t, []string{"debug", "history", source})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "Source: "+source) {
+		t.Fatalf("debug history = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	code, stdout, stderr = captureRun(t, []string{"untrack", source})
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "untracked: "+source) {
 		t.Fatalf("untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
-	code, stdout, stderr = captureRun(t, []string{"list"})
+	code, stdout, stderr = captureRun(t, []string{"debug", "list"})
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "No sources tracked in configured vault") {
 		t.Fatalf("list after untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
