@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"md2obs/internal/config"
-	"md2obs/internal/watcher"
+	"github.com/alexzeitgeist/md2obs/internal/config"
+	"github.com/alexzeitgeist/md2obs/internal/watcher"
 )
 
 const (

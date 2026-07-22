@@ -2,7 +2,7 @@
 
 package main
 
-import "md2obs/internal/config"
+import "github.com/alexzeitgeist/md2obs/internal/config"
 
 // Native foreground-watcher locking is currently implemented on the two
 // platforms md2obs supports for watch operation. Other platforms retain the

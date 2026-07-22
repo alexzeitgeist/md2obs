@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"md2obs/internal/app"
-	"md2obs/internal/config"
-	"md2obs/internal/database"
-	"md2obs/internal/layout"
+	"github.com/alexzeitgeist/md2obs/internal/app"
+	"github.com/alexzeitgeist/md2obs/internal/config"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/layout"
 )
 
 const usage = `Copy selected Markdown files into dated folders in an Obsidian vault.

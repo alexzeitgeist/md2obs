@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"md2obs/internal/database"
-	"md2obs/internal/source"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/source"
 )
 
 // candidateReconcileResult describes the source-side outcome of reconciling

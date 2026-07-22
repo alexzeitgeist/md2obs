@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"md2obs/internal/database"
-	"md2obs/internal/watcher"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/watcher"
 )
 
 // WatchOptions are the validated `md2obs watch` flags.

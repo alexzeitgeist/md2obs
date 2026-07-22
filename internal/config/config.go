@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 
-	"md2obs/internal/safepath"
+	"github.com/alexzeitgeist/md2obs/internal/safepath"
 )
 
 // Config is the resolved, validated configuration for one invocation.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/database"
 )
 
 // RunList prints every known source with its most recent snapshot. This is

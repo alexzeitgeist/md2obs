@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"md2obs/internal/database"
-	"md2obs/internal/source"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/source"
 )
 
 // UntrackOptions selects sources whose bookkeeping should be forgotten in the

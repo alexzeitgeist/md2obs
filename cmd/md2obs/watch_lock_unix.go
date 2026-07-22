@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"md2obs/internal/config"
+	"github.com/alexzeitgeist/md2obs/internal/config"
 )
 
 var errWatchAlreadyRunning = errors.New("another watcher is already running for this database and vault")

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"md2obs/internal/config"
-	"md2obs/internal/database"
-	"md2obs/internal/layout"
-	"md2obs/internal/watcher"
+	"github.com/alexzeitgeist/md2obs/internal/config"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/layout"
+	"github.com/alexzeitgeist/md2obs/internal/watcher"
 )
 
 // syncBuffer lets the watcher goroutine and the test write/read output

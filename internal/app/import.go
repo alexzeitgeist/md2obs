@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"md2obs/internal/database"
-	"md2obs/internal/layout"
-	"md2obs/internal/materialize"
-	"md2obs/internal/safepath"
-	"md2obs/internal/source"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/layout"
+	"github.com/alexzeitgeist/md2obs/internal/materialize"
+	"github.com/alexzeitgeist/md2obs/internal/safepath"
+	"github.com/alexzeitgeist/md2obs/internal/source"
 )
 
 // Policy decides what happens when the vault copy about to be overwritten

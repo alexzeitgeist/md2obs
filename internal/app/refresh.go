@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/database"
 )
 
 // RefreshOptions are the validated `md2obs refresh` flags.

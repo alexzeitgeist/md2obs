@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"md2obs/internal/app"
+	"github.com/alexzeitgeist/md2obs/internal/app"
 )
 
 func TestParseCommand(t *testing.T) {

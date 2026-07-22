@@ -1,4 +1,4 @@
-module md2obs
+module github.com/alexzeitgeist/md2obs
 
 go 1.26.4
 

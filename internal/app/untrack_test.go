@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"md2obs/internal/database"
-	"md2obs/internal/watcher"
+	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/watcher"
 )
 
 func TestRunUntrackNamedForgetsBookkeepingAndReimportRegistersFresh(t *testing.T) {
