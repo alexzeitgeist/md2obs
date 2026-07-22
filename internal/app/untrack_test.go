@@ -156,7 +156,7 @@ func TestRunUntrackMissingIsConservativeAndSupportsDryRun(t *testing.T) {
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Missing: true, DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(env.out.String(), "would untrack: "+missing+" (forget 1 materialization, collect 1 snapshot, 1 revision, source collected)") || !strings.Contains(env.out.String(), "unavailable, still tracked: "+unavailable) {
+	if !strings.Contains(env.out.String(), "would untrack: "+missing) || !strings.Contains(env.out.String(), "unavailable, still tracked: "+unavailable) {
 		t.Fatalf("dry-run diagnostics missing:\n%s", env.out.String())
 	}
 	for _, path := range []string{present, missing, unavailable} {
@@ -338,7 +338,7 @@ func TestRunUntrackNotifiesRunningWatcherMembership(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 1 imported sources")
+		return strings.Contains(env.out.String(), "Watching 1 source")
 	}) {
 		t.Fatalf("watcher did not start:\n%s", env.out.String())
 	}

@@ -48,7 +48,7 @@ func TestWatchNoSources(t *testing.T) {
 		})
 	}()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources from 0 directories")
+		return strings.Contains(env.out.String(), "Watching 0 sources in 0 directories")
 	}) {
 		cancel()
 		<-done
@@ -106,7 +106,7 @@ func TestWatchEndToEnd(t *testing.T) {
 	defer cancel()
 
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 1 imported sources")
+		return strings.Contains(env.out.String(), "Watching 1 source")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -195,7 +195,7 @@ func TestWatchDaysIncludesOlderSnapshot(t *testing.T) {
 		})
 	}()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Date range: 2026-07-19 through 2026-07-20")
+		return strings.Contains(env.out.String(), "Import dates: 2026-07-19 to 2026-07-20")
 	}) {
 		cancel()
 		<-done
@@ -218,7 +218,7 @@ func TestWatchEnrollsImportAfterEmptyStartup(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("empty watcher did not start; output:\n%s", env.out.String())
 	}
@@ -273,7 +273,7 @@ func TestWatchRapidImportsAllBecomeEnrolled(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("empty watcher did not start; output:\n%s", env.out.String())
 	}
@@ -331,7 +331,7 @@ func TestWatchDynamicEnrollmentIsVaultScoped(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(envA.out.String(), "Watching 0 imported sources")
+		return strings.Contains(envA.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("vault-a watcher did not start; output:\n%s", envA.out.String())
 	}
@@ -400,7 +400,7 @@ func TestWatchEnrollmentSurvivesMidnightNotification(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -443,7 +443,7 @@ func TestWatchUnchangedActivationLeavesVaultEditAlone(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -525,7 +525,7 @@ func TestWatchMissingActivationIsSilentAndRecreationWorks(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -590,7 +590,7 @@ func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -655,7 +655,7 @@ func TestWatchActivationImportFailureKeepsSourceEnrolled(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start; output:\n%s", env.out.String())
 	}
@@ -724,7 +724,7 @@ func TestWatchCountsDatabaseDirectoryWhenItIsASourceParent(t *testing.T) {
 		})
 	}()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 1 imported sources from 1 directories")
+		return strings.Contains(env.out.String(), "Watching 1 source in 1 directory")
 	}) {
 		cancel()
 		<-done

@@ -169,7 +169,7 @@ func TestRunCommandHelp(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
 	}
-	for _, want := range []string{"md2obs watch [OPTIONS]", "stays in the foreground", "--debounce", "--on-vault-change"} {
+	for _, want := range []string{"md2obs watch [OPTIONS]", "Runs in the foreground", "--debounce", "--on-vault-change"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
@@ -257,7 +257,7 @@ func TestRunUntrackHelp(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("untrack help = %d, stderr = %q", code, stderr)
 	}
-	for _, want := range []string{"md2obs untrack", "--missing", "--older-than", "--dry-run", "registers"} {
+	for _, want := range []string{"md2obs untrack", "--missing", "--older-than", "--dry-run", "starts tracking"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}

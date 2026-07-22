@@ -59,7 +59,7 @@ func RunHistory(ctx context.Context, d *Deps, file string) error {
 
 	fmt.Fprintf(d.Out, "Source: %s\n\n", src.DisplayPath)
 	for _, e := range entries {
-		rel := "(not materialized in current vault)"
+		rel := "(no copy in this vault)"
 		if e.RelativePath.Valid {
 			rel = e.RelativePath.String
 		}

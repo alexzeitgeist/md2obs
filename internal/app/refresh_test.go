@@ -261,7 +261,7 @@ func TestRefreshAllEnrollsOlderSourceInRunningWatcher(t *testing.T) {
 	}()
 	defer cancel()
 	if !waitUntil(5*time.Second, func() bool {
-		return strings.Contains(env.out.String(), "Watching 0 imported sources")
+		return strings.Contains(env.out.String(), "Watching 0 sources")
 	}) {
 		t.Fatalf("watcher did not start empty; output:\n%s", env.out.String())
 	}

@@ -219,18 +219,7 @@ func applyUntrack(ctx context.Context, d *Deps, vaultID int64, selected []untrac
 				continue
 			}
 			changed++
-			fmt.Fprintf(
-				d.Out,
-				"would untrack: %s (forget %d materialization%s, collect %d snapshot%s, %d revision%s, source %s)\n",
-				selection.entry.DisplayPath,
-				result.MaterializationsDeleted,
-				pluralSuffix(result.MaterializationsDeleted),
-				result.SnapshotsDeleted,
-				pluralSuffix(result.SnapshotsDeleted),
-				result.RevisionsDeleted,
-				pluralSuffix(result.RevisionsDeleted),
-				collectedOrRetained(result.SourceDeleted),
-			)
+			fmt.Fprintf(d.Out, "would untrack: %s\n", selection.entry.DisplayPath)
 		}
 		return changed, nil
 	}
@@ -266,20 +255,6 @@ func applyUntrack(ctx context.Context, d *Deps, vaultID int64, selected []untrac
 		fmt.Fprintf(d.Out, "untracked: %s\n", selection.entry.DisplayPath)
 	}
 	return len(changed), nil
-}
-
-func collectedOrRetained(collected bool) string {
-	if collected {
-		return "collected"
-	}
-	return "retained"
-}
-
-func pluralSuffix(count int64) string {
-	if count == 1 {
-		return ""
-	}
-	return "s"
 }
 
 func notifyUntrack(d *Deps) {

@@ -22,7 +22,7 @@ import (
 	"md2obs/internal/layout"
 )
 
-const usage = `md2obs imports explicitly selected Markdown files into an Obsidian vault.
+const usage = `Copy selected Markdown files into dated folders in an Obsidian vault.
 
 Usage:
   md2obs FILE...
@@ -34,28 +34,18 @@ Usage:
   md2obs debug COMMAND
 
 Commands:
-  import   Import (or refresh) the named Markdown files into today's
-           dated vault folder. This is the default when the command is
-           omitted. Explicit imports always overwrite.
-  refresh  Check previously imported sources for changes and catch up the
-           changed ones. --days selects recent materializations (default 1);
-           --all selects every source currently tracked in this vault.
-           Vault edits are skipped by default.
-  watch    Watch sources materialized in this vault today (--days N widens
-           the initial window) and enroll later imports while running.
-           Re-import watched sources when they change.
-           --debounce sets the per-source quiet period (default 500ms).
-           --on-vault-change sets the policy when the vault copy was edited
-           since the last import: skip (default), overwrite, or preserve.
-  untrack  Forget named sources in this vault, or select a batch by definite
-           absence and/or materialization age. Database bookkeeping no other
-           vault needs is collected; physical vault files are untouched.
-  debug    Inspect internal bookkeeping with list, history, and status.
+  import   Copy files into today's folder (default command).
+  refresh  Check tracked sources once and copy changes.
+  watch    Watch tracked sources and copy changes until stopped.
+  untrack  Stop tracking sources without deleting vault files.
+  debug    Inspect configuration and state.
+
+Run 'md2obs COMMAND --help' for command options.
 
 Configuration:
-  Config file  ~/.config/md2obs/config.json (Linux)
+  Config file      ~/.config/md2obs/config.json (Linux)
   MD2OBS_VAULT     overrides vault_path
-  MD2OBS_STATE_DB  overrides the state database location
+  MD2OBS_STATE_DB  overrides the state database path
 `
 
 var commandUsage = map[string]string{
@@ -63,62 +53,57 @@ var commandUsage = map[string]string{
   md2obs FILE...
   md2obs import FILE...
 
-Import or refresh explicitly named Markdown files. An explicit import restores
-the source content if the vault copy was edited.
+Copy each FILE into today's dated folder. Running the command again updates
+today's copy. Explicit imports replace edits made to the managed vault copy.
 `,
 	"refresh": `Usage:
   md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
 
-Check sources previously materialized in the configured vault and import the
-ones whose current content differs from their selected snapshot.
+Check tracked sources once and copy any changes.
 
 Options:
-  --days N                    Materialization date window (default 1)
-  --all                       Every source currently tracked in this vault
-  --on-vault-change POLICY    skip (default), overwrite, or preserve
+  --days N                    Sources imported in the last N days (default 1)
+  --all                       All sources tracked in this vault
+  --on-vault-change POLICY    skip (default), preserve, or overwrite
 `,
 	"watch": `Usage:
   md2obs watch [OPTIONS]
 
-Watch sources recently imported into the configured vault using native
-filesystem notifications. The watcher stays in the foreground until
-interrupted. Successful imports join a running watch session.
+Watch recently imported sources. Runs in the foreground until interrupted.
+New imports join the watch automatically.
 
 Options:
-  --days N                    Inclusive calendar-day window (default 1)
-  --debounce DURATION         Per-source quiet period (default 500ms)
-  --on-vault-change POLICY    skip (default), overwrite, or preserve
+  --days N                    Sources imported in the last N days (default 1)
+  --debounce DURATION         How long a change must settle before copying
+                              (default 500ms)
+  --on-vault-change POLICY    skip (default), preserve, or overwrite
 `,
 	"untrack": `Usage:
   md2obs untrack [--dry-run] FILE...
   md2obs untrack --missing [--older-than AGE] [--dry-run]
   md2obs untrack --older-than AGE [--dry-run]
 
-Forget selected sources in the configured vault. Materialization records for
-this vault and bookkeeping no other vault references are removed. Physical
-vault files are untouched. A later explicit import registers the source again.
+Stop tracking sources without deleting their vault copies. Importing an
+untracked source starts tracking it again.
 
-Batch selectors are combined: --missing --older-than 30d selects sources that
-are both definitely absent and older than 30 local calendar days.
+When selectors are combined, a source must match all of them.
 
 Options:
-  --missing           Exact source absent while its parent is accessible
-  --older-than AGE    Newest materialized snapshot is older than AGE (for
-                      example 30d or 365d)
-  --dry-run           Report bookkeeping that would be forgotten or collected
+  --missing           Sources that no longer exist
+  --older-than AGE    Sources last imported more than AGE ago (such as 30d)
+  --dry-run           Show what would change
 `,
 	"debug list": `Usage: md2obs debug list
 
-List sources currently tracked in the configured vault.
+List tracked sources and their latest vault paths.
 `,
 	"debug history": `Usage: md2obs debug history FILE
 
-Show retained snapshot diagnostics for one explicitly imported source. Entries
-are complete while the source remains tracked but may be collected by untrack.
+Show stored snapshot records for one source.
 `,
 	"debug status": `Usage: md2obs debug status
 
-Show configuration, database location, schema version, and counts.
+Show resolved paths, schema version, and state counts.
 `,
 }
 
@@ -128,9 +113,9 @@ const debugUsage = `Usage:
   md2obs debug status
 
 Debug commands:
-  list     List sources currently tracked in this vault.
-  history  Show retained snapshot diagnostics for one source.
-  status   Show configuration, database location, schema version, and counts.
+  list     List tracked sources and their latest vault paths.
+  history  Show stored snapshot records for one source.
+  status   Show resolved paths, schema version, and state counts.
 `
 
 func main() {
@@ -261,9 +246,9 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 
 	case "refresh":
 		fs := commandFlagSet("refresh")
-		days := fs.Int("days", 1, "materialization date window (1 = today)")
-		allSources := fs.Bool("all", false, "every source currently tracked in this vault")
-		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
+		days := fs.Int("days", 1, "sources imported in the last N days (1 = today)")
+		allSources := fs.Bool("all", false, "all sources tracked in this vault")
+		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "edited vault copy: skip, preserve, or overwrite")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
@@ -299,9 +284,9 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 
 	case "watch":
 		fs := commandFlagSet("watch")
-		days := fs.Int("days", 1, "inclusive calendar-day window (1 = today)")
-		debounce := fs.Duration("debounce", app.DefaultDebounce, "per-source quiet period before re-import")
-		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
+		days := fs.Int("days", 1, "sources imported in the last N days (1 = today)")
+		debounce := fs.Duration("debounce", app.DefaultDebounce, "how long a change must settle before copying")
+		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "edited vault copy: skip, preserve, or overwrite")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
@@ -324,9 +309,9 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 
 	case "untrack":
 		fs := commandFlagSet("untrack")
-		missing := fs.Bool("missing", false, "sources whose exact path is absent while its parent is accessible")
-		olderThan := fs.String("older-than", "", "sources whose newest materialized snapshot is older than AGE")
-		dryRun := fs.Bool("dry-run", false, "report without changing bookkeeping")
+		missing := fs.Bool("missing", false, "sources that no longer exist")
+		olderThan := fs.String("older-than", "", "sources last imported more than AGE ago")
+		dryRun := fs.Bool("dry-run", false, "show changes without applying them")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
