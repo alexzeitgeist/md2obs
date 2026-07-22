@@ -320,9 +320,9 @@ For anything you want to keep, duplicate the note into a normal folder
   existing terminal with Ctrl-C before starting another for the same database
   and vault. After upgrading from a version with the background daemon, kill
   any leftover daemon process from the previous version.
-- **`notification queue overflowed`** — source changes or membership updates
-  may have been lost; restart the watcher, run `md2obs refresh --all`, or re-run
-  the affected `import`/`untrack` command.
+- **`notification queue overflowed`** — the watcher refreshes its membership
+  automatically, but source changes may have been lost; run
+  `md2obs refresh --all` or re-run the affected `import`.
 - **Import warns that running watchers may need to be restarted** — the import
   itself committed, but its cross-process watcher notification failed. Stop and
   run `md2obs watch` again, or fix the reported state-directory error and

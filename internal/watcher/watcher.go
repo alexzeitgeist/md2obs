@@ -279,7 +279,8 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				return nil
 			}
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				logger.Warn("notification queue overflowed; source changes or membership updates may have been missed", "action", "restart the watcher or re-run the affected import/untrack command")
+				logger.Warn("notification queue overflowed; refreshing membership, but source changes may have been missed", "action", "re-run affected imports or restart the watcher")
+				refreshDebouncer.Trigger(notificationPath)
 			} else {
 				logger.Error("filesystem watcher error", "err", err)
 			}
