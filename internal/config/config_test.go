@@ -52,6 +52,8 @@ func TestValidateRejects(t *testing.T) {
 		{"root absolute", func(c *Config) { c.RootDirectory = "/abs" }, "must be relative"},
 		{"root escapes", func(c *Config) { c.RootDirectory = "../out" }, "escapes"},
 		{"root hidden", func(c *Config) { c.RootDirectory = ".hidden" }, "hidden"},
+		{"root hidden first component", func(c *Config) { c.RootDirectory = ".hidden/ext" }, "hidden"},
+		{"root hidden intermediate component", func(c *Config) { c.RootDirectory = "visible/.hidden/ext" }, "hidden"},
 		{"db inside vault", func(c *Config) { c.StateDBPath = filepath.Join(c.VaultPath, "state.db") }, "outside the vault"},
 	}
 	for _, tc := range cases {

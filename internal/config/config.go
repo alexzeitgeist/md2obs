@@ -170,8 +170,10 @@ func (c *Config) Validate() error {
 	if root == ".." || strings.HasPrefix(root, "../") {
 		return fmt.Errorf("root_directory %q escapes the vault", c.RootDirectory)
 	}
-	if strings.HasPrefix(path.Base(root), ".") {
-		return fmt.Errorf("root_directory %q must not be hidden (leading dot)", c.RootDirectory)
+	for _, component := range strings.Split(root, "/") {
+		if strings.HasPrefix(component, ".") {
+			return fmt.Errorf("root_directory %q must not contain hidden components (leading dot)", c.RootDirectory)
+		}
 	}
 	c.RootDirectory = root
 	destResolved, err := safepath.ResolveExistingAncestor(c.DestRootAbs())

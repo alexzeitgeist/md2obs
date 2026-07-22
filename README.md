@@ -34,7 +34,7 @@ install -m 0755 md2obs ~/.local/bin/
 - `vault_path` — your Obsidian vault root. Must exist.
 - `layout` — destination layout; only `dated-flat-v1` exists today.
 - `root_directory` — vault-relative destination root. Not the vault root
-  itself, not hidden (no leading dot), must stay inside the vault.
+  itself, no path component may start with a dot, must stay inside the vault.
 
 Environment overrides for scripting:
 
