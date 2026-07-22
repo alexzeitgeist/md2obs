@@ -11,17 +11,17 @@ import (
 // later explicit imports can be enrolled; every other file appearing in an
 // armed directory is ignored by construction.
 type Index struct {
-	sources   map[string]struct{}
-	parentSet map[string]struct{}
-	parents   []string
+	sources    map[string]struct{}
+	parentRefs map[string]int
+	parents    []string
 }
 
 // NewIndex builds the exact-path set and the deduplicated list of immediate
 // parent directories to watch.
 func NewIndex(paths []string) *Index {
 	ix := &Index{
-		sources:   make(map[string]struct{}, len(paths)),
-		parentSet: make(map[string]struct{}),
+		sources:    make(map[string]struct{}, len(paths)),
+		parentRefs: make(map[string]int),
 	}
 	for _, p := range paths {
 		ix.Add(p)
@@ -39,22 +39,43 @@ func (ix *Index) Add(path string) bool {
 	}
 	ix.sources[clean] = struct{}{}
 	parent := filepath.Dir(clean)
-	if _, ok := ix.parentSet[parent]; !ok {
-		ix.parentSet[parent] = struct{}{}
+	if ix.parentRefs[parent] == 0 {
 		ix.parents = append(ix.parents, parent)
 		sort.Strings(ix.parents)
 	}
+	ix.parentRefs[parent]++
 	return true
 }
 
-// Remove stops matching a source until a later membership refresh adds it.
+// Remove stops matching a source until a later membership refresh adds it. It
+// also releases the parent from the index when no selected source still uses
+// that directory.
 func (ix *Index) Remove(path string) bool {
 	clean := filepath.Clean(path)
 	if _, ok := ix.sources[clean]; !ok {
 		return false
 	}
 	delete(ix.sources, clean)
+
+	parent := filepath.Dir(clean)
+	ix.parentRefs[parent]--
+	if ix.parentRefs[parent] == 0 {
+		delete(ix.parentRefs, parent)
+		for i, indexedParent := range ix.parents {
+			if indexedParent != parent {
+				continue
+			}
+			ix.parents = append(ix.parents[:i], ix.parents[i+1:]...)
+			break
+		}
+	}
 	return true
+}
+
+// HasParent reports whether any currently selected source uses parent.
+func (ix *Index) HasParent(parent string) bool {
+	_, ok := ix.parentRefs[filepath.Clean(parent)]
+	return ok
 }
 
 // Paths returns the currently selected exact source paths in sorted order.

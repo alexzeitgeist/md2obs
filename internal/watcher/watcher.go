@@ -108,8 +108,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				if _, keep := desired[path]; keep {
 					continue
 				}
-				ix.Remove(path)
-				remove(path)
+				removeWatchedSource(w, ix, notificationParent, path, remove, logger)
 			}
 		}
 	}
@@ -218,5 +217,30 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+type watchRemover interface {
+	Remove(string) error
+}
+
+func removeWatchedSource(
+	w watchRemover,
+	ix *Index,
+	notificationParent string,
+	path string,
+	remove func(string),
+	logger *slog.Logger,
+) {
+	parent := filepath.Dir(filepath.Clean(path))
+	if !ix.Remove(path) {
+		return
+	}
+	remove(path)
+	if ix.HasParent(parent) || parent == notificationParent {
+		return
+	}
+	if err := w.Remove(parent); err != nil && !errors.Is(err, fsnotify.ErrNonExistentWatch) {
+		logger.Warn("cannot release source directory watch", "parent", parent, "err", err)
 	}
 }

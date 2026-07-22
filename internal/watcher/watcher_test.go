@@ -76,6 +76,76 @@ func TestIndexDynamicAdditionIsIdempotent(t *testing.T) {
 	if got := ix.Paths(); !reflect.DeepEqual(got, wantPaths) {
 		t.Fatalf("Paths after removal = %v, want %v", got, wantPaths)
 	}
+	if !ix.HasParent("/home/alex/project-a") {
+		t.Fatal("parent with a remaining source was removed")
+	}
+	if !ix.Remove("/home/alex/project-a/one.md") {
+		t.Fatal("last source in parent was not removed")
+	}
+	wantParents = []string{"/home/alex/project-b"}
+	if got := ix.Parents(); !reflect.DeepEqual(got, wantParents) {
+		t.Fatalf("Parents after last source removal = %v, want %v", got, wantParents)
+	}
+	if ix.HasParent("/home/alex/project-a") {
+		t.Fatal("parent without sources remained indexed")
+	}
+	if !ix.Add("/home/alex/project-a/readded.md") {
+		t.Fatal("source in released parent was not re-added")
+	}
+	wantParents = []string{"/home/alex/project-a", "/home/alex/project-b"}
+	if got := ix.Parents(); !reflect.DeepEqual(got, wantParents) {
+		t.Fatalf("Parents after re-addition = %v, want %v", got, wantParents)
+	}
+}
+
+type recordingWatchRemover struct {
+	paths []string
+}
+
+func (r *recordingWatchRemover) Remove(path string) error {
+	r.paths = append(r.paths, path)
+	return nil
+}
+
+func TestRemoveWatchedSourceReleasesOnlyUnusedSourceParent(t *testing.T) {
+	const (
+		sourceParent       = "/home/alex/project"
+		notificationParent = "/home/alex/state"
+	)
+	one := filepath.Join(sourceParent, "one.md")
+	two := filepath.Join(sourceParent, "two.md")
+	notificationSibling := filepath.Join(notificationParent, "source.md")
+	ix := NewIndex([]string{one, two, notificationSibling})
+	remover := &recordingWatchRemover{}
+	removedSources := make([]string, 0, 3)
+	remove := func(path string) { removedSources = append(removedSources, path) }
+
+	removeWatchedSource(remover, ix, notificationParent, one, remove, discardLogger())
+	if len(remover.paths) != 0 {
+		t.Fatalf("shared parent released with one source remaining: %v", remover.paths)
+	}
+	if !ix.HasParent(sourceParent) {
+		t.Fatal("shared parent was pruned with one source remaining")
+	}
+
+	removeWatchedSource(remover, ix, notificationParent, two, remove, discardLogger())
+	if want := []string{sourceParent}; !reflect.DeepEqual(remover.paths, want) {
+		t.Fatalf("released parents = %v, want %v", remover.paths, want)
+	}
+	if ix.HasParent(sourceParent) {
+		t.Fatal("unused source parent remained indexed")
+	}
+
+	removeWatchedSource(remover, ix, notificationParent, notificationSibling, remove, discardLogger())
+	if want := []string{sourceParent}; !reflect.DeepEqual(remover.paths, want) {
+		t.Fatalf("notification parent watch was released: %v", remover.paths)
+	}
+	if ix.HasParent(notificationParent) {
+		t.Fatal("notification parent remained in the source index")
+	}
+	if want := []string{one, two, notificationSibling}; !reflect.DeepEqual(removedSources, want) {
+		t.Fatalf("removed source callbacks = %v, want %v", removedSources, want)
+	}
 }
 
 func TestDebouncerCoalescesBursts(t *testing.T) {
