@@ -100,7 +100,7 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			return
 		}
 		res, err := ImportWatchedSource(ctx, d, candidate.Source, opts.OnVaultChange)
-		if errors.Is(err, errSourceUntracked) {
+		if errors.Is(err, errSourceUntracked) || errors.Is(err, os.ErrNotExist) {
 			return
 		}
 		if err != nil {
