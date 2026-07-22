@@ -8,8 +8,8 @@ import (
 )
 
 func TestParentParts(t *testing.T) {
-	got := ParentParts("/home/alex/project-b/README.md")
-	want := []string{"project-b", "alex", "home"}
+	got := ParentParts("/home/alice/project-b/README.md")
+	want := []string{"project-b", "alice", "home"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParentParts = %v, want %v", got, want)
 	}

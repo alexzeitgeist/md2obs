@@ -16,84 +16,84 @@ import (
 
 func TestIndexExactPathFiltering(t *testing.T) {
 	ix := NewIndex([]string{
-		"/home/alex/project-a/README.md",
-		"/home/alex/project-a/response.md",
-		"/home/alex/project-b/notes.md",
+		"/home/alice/project-a/README.md",
+		"/home/alice/project-a/response.md",
+		"/home/alice/project-b/notes.md",
 	})
 
 	if ix.Len() != 3 {
 		t.Errorf("Len = %d", ix.Len())
 	}
-	want := []string{"/home/alex/project-a", "/home/alex/project-b"}
+	want := []string{"/home/alice/project-a", "/home/alice/project-b"}
 	if !reflect.DeepEqual(ix.Parents(), want) {
 		t.Errorf("Parents = %v, want %v", ix.Parents(), want)
 	}
 
-	if _, ok := ix.Match("/home/alex/project-a/README.md"); !ok {
+	if _, ok := ix.Match("/home/alice/project-a/README.md"); !ok {
 		t.Error("exact path did not match")
 	}
 	// Cleaning: an event path with a redundant segment still matches.
-	if _, ok := ix.Match("/home/alex/project-a/./README.md"); !ok {
+	if _, ok := ix.Match("/home/alice/project-a/./README.md"); !ok {
 		t.Error("uncleaned event path did not match")
 	}
 	// Unrelated files in a watched directory never match.
-	if _, ok := ix.Match("/home/alex/project-a/new.md"); ok {
+	if _, ok := ix.Match("/home/alice/project-a/new.md"); ok {
 		t.Error("unregistered file matched")
 	}
 	// Same basename in a nested (unwatched) directory never matches.
-	if _, ok := ix.Match("/home/alex/project-a/docs/README.md"); ok {
+	if _, ok := ix.Match("/home/alice/project-a/docs/README.md"); ok {
 		t.Error("nested file matched")
 	}
 }
 
 func TestIndexDynamicAdditionIsIdempotent(t *testing.T) {
 	ix := NewIndex(nil)
-	if !ix.Add("/home/alex/project-a/one.md") {
+	if !ix.Add("/home/alice/project-a/one.md") {
 		t.Fatal("first addition was not reported as new")
 	}
-	if ix.Add("/home/alex/project-a/./one.md") {
+	if ix.Add("/home/alice/project-a/./one.md") {
 		t.Fatal("cleaned duplicate was reported as new")
 	}
-	if !ix.Add("/home/alex/project-a/two.md") {
+	if !ix.Add("/home/alice/project-a/two.md") {
 		t.Fatal("second source in existing parent was not added")
 	}
-	if !ix.Add("/home/alex/project-b/three.md") {
+	if !ix.Add("/home/alice/project-b/three.md") {
 		t.Fatal("source in new parent was not added")
 	}
 	if ix.Len() != 3 {
 		t.Fatalf("Len = %d, want 3", ix.Len())
 	}
-	wantParents := []string{"/home/alex/project-a", "/home/alex/project-b"}
+	wantParents := []string{"/home/alice/project-a", "/home/alice/project-b"}
 	if !reflect.DeepEqual(ix.Parents(), wantParents) {
 		t.Errorf("Parents = %v, want %v", ix.Parents(), wantParents)
 	}
-	if _, ok := ix.Match("/home/alex/project-a/unrelated.md"); ok {
+	if _, ok := ix.Match("/home/alice/project-a/unrelated.md"); ok {
 		t.Error("dynamic parent caused unrelated path to match")
 	}
-	if !ix.Remove("/home/alex/project-a/two.md") {
+	if !ix.Remove("/home/alice/project-a/two.md") {
 		t.Fatal("existing source was not removed")
 	}
-	wantPaths := []string{"/home/alex/project-a/one.md", "/home/alex/project-b/three.md"}
+	wantPaths := []string{"/home/alice/project-a/one.md", "/home/alice/project-b/three.md"}
 	if got := ix.Paths(); !reflect.DeepEqual(got, wantPaths) {
 		t.Fatalf("Paths after removal = %v, want %v", got, wantPaths)
 	}
-	if !ix.HasParent("/home/alex/project-a") {
+	if !ix.HasParent("/home/alice/project-a") {
 		t.Fatal("parent with a remaining source was removed")
 	}
-	if !ix.Remove("/home/alex/project-a/one.md") {
+	if !ix.Remove("/home/alice/project-a/one.md") {
 		t.Fatal("last source in parent was not removed")
 	}
-	wantParents = []string{"/home/alex/project-b"}
+	wantParents = []string{"/home/alice/project-b"}
 	if got := ix.Parents(); !reflect.DeepEqual(got, wantParents) {
 		t.Fatalf("Parents after last source removal = %v, want %v", got, wantParents)
 	}
-	if ix.HasParent("/home/alex/project-a") {
+	if ix.HasParent("/home/alice/project-a") {
 		t.Fatal("parent without sources remained indexed")
 	}
-	if !ix.Add("/home/alex/project-a/readded.md") {
+	if !ix.Add("/home/alice/project-a/readded.md") {
 		t.Fatal("source in released parent was not re-added")
 	}
-	wantParents = []string{"/home/alex/project-a", "/home/alex/project-b"}
+	wantParents = []string{"/home/alice/project-a", "/home/alice/project-b"}
 	if got := ix.Parents(); !reflect.DeepEqual(got, wantParents) {
 		t.Fatalf("Parents after re-addition = %v, want %v", got, wantParents)
 	}
@@ -110,8 +110,8 @@ func (r *recordingWatchRemover) Remove(path string) error {
 
 func TestRemoveWatchedSourceReleasesOnlyUnusedSourceParent(t *testing.T) {
 	const (
-		sourceParent       = "/home/alex/project"
-		notificationParent = "/home/alex/state"
+		sourceParent       = "/home/alice/project"
+		notificationParent = "/home/alice/state"
 	)
 	one := filepath.Join(sourceParent, "one.md")
 	two := filepath.Join(sourceParent, "two.md")

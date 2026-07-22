@@ -22,16 +22,16 @@ func candidates(t *testing.T, in CandidateInput) []string {
 func TestCollisionProgression(t *testing.T) {
 	got := candidates(t, CandidateInput{
 		SnapshotDate:  testDate,
-		SourcePath:    "/home/alex/project-b/README.md",
+		SourcePath:    "/home/alice/project-b/README.md",
 		Basename:      "README.md",
-		ParentParts:   []string{"project-b", "alex", "home"},
+		ParentParts:   []string{"project-b", "alice", "home"},
 		RootDirectory: "_External",
 	})
 	want := []string{
 		"_External/2026-07-20/README.md",
 		"_External/2026-07-20/README--project-b.md",
-		"_External/2026-07-20/README--project-b--alex.md",
-		"_External/2026-07-20/README--project-b--alex--home.md",
+		"_External/2026-07-20/README--project-b--alice.md",
+		"_External/2026-07-20/README--project-b--alice--home.md",
 	}
 	if len(got) != len(want)+1 {
 		t.Fatalf("got %d candidates, want %d: %v", len(got), len(want)+1, got)
@@ -42,7 +42,7 @@ func TestCollisionProgression(t *testing.T) {
 		}
 	}
 	last := got[len(got)-1]
-	if !strings.HasPrefix(last, "_External/2026-07-20/README--project-b--alex--home--") ||
+	if !strings.HasPrefix(last, "_External/2026-07-20/README--project-b--alice--home--") ||
 		!strings.HasSuffix(last, ".md") {
 		t.Errorf("hash fallback candidate = %q", last)
 	}
@@ -87,9 +87,9 @@ func TestMultiDotStemPreserved(t *testing.T) {
 func TestUnicodePreserved(t *testing.T) {
 	got := candidates(t, CandidateInput{
 		SnapshotDate:  testDate,
-		SourcePath:    "/home/alex/anteckningar/räksmörgås.md",
+		SourcePath:    "/home/alice/anteckningar/räksmörgås.md",
 		Basename:      "räksmörgås.md",
-		ParentParts:   []string{"anteckningar", "alex", "home"},
+		ParentParts:   []string{"anteckningar", "alice", "home"},
 		RootDirectory: "_External",
 	})
 	if got[0] != "_External/2026-07-20/räksmörgås.md" {
@@ -143,7 +143,7 @@ func TestHiddenNamesMadeVisible(t *testing.T) {
 func TestContainment(t *testing.T) {
 	got := candidates(t, CandidateInput{
 		SnapshotDate:  testDate,
-		SourcePath:    "/home/alex/../../etc/notes.md",
+		SourcePath:    "/home/alice/../../etc/notes.md",
 		Basename:      "notes.md",
 		ParentParts:   []string{"..", "etc"},
 		RootDirectory: "_External",

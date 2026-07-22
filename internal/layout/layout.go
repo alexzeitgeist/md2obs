@@ -15,7 +15,7 @@ type CandidateInput struct {
 	// Basename is the source file name, e.g. "README.md".
 	Basename string
 	// ParentParts are the source's parent directory names, nearest first,
-	// e.g. ["project-b", "alex", "home"] for /home/alex/project-b/README.md.
+	// e.g. ["project-b", "alice", "home"] for /home/alice/project-b/README.md.
 	ParentParts []string
 	// RootDirectory is the vault-relative destination root, e.g. "_External".
 	RootDirectory string

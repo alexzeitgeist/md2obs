@@ -20,9 +20,9 @@ const maxFilenameBytes = 255
 //
 //	README.md
 //	README--project-b.md
-//	README--project-b--alex.md
-//	README--project-b--alex--home.md
-//	README--project-b--alex--home--a1b2c3.md
+//	README--project-b--alice.md
+//	README--project-b--alice--home.md
+//	README--project-b--alice--home--a1b2c3.md
 type DatedFlatV1 struct{}
 
 func NewDatedFlatV1() *DatedFlatV1 { return &DatedFlatV1{} }

@@ -25,7 +25,7 @@ install -m 0755 md2obs ~/.local/bin/
 
 ```json
 {
-  "vault_path": "/home/alex/obsidian/vault",
+  "vault_path": "/home/alice/obsidian/vault",
   "layout": "dated-flat-v1",
   "root_directory": "_External"
 }
@@ -81,7 +81,7 @@ Each file is hashed and written atomically to
 - **unchanged** — content already current; no vault write.
 
 Same-name files from different places get progressively more path context:
-`README.md`, `README--project-b.md`, `README--project-b--alex.md`, …, with a
+`README.md`, `README--project-b.md`, `README--project-b--alice.md`, …, with a
 deterministic 6-hex-digit hash suffix as the final fallback. Explicit
 `import` always overwrites the vault copy, including edits made in Obsidian.
 An existing destination that is not owned by the state database is preserved;
@@ -385,3 +385,8 @@ commit atomically, however: a database failure after a successful rename can
 leave the vault ahead of the recorded state. Imports are safe to retry and
 converge on the source's current content. md2obs does not retain revision bytes
 or guarantee reconstruction of deleted historical snapshots.
+
+## License
+
+md2obs is available under the [MIT License](LICENSE). Binary distributions
+must also include the notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

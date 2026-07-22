@@ -22,7 +22,7 @@ func Canonicalize(p string) (canonical, display string, err error) {
 }
 
 // ParentParts returns the parent directory names of a canonical path,
-// nearest first: /home/alex/project-b/README.md -> [project-b alex home].
+// nearest first: /home/alice/project-b/README.md -> [project-b alice home].
 func ParentParts(canonical string) []string {
 	var parts []string
 	dir := filepath.Dir(canonical)
