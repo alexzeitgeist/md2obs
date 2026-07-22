@@ -59,7 +59,7 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 		return err
 	}
 
-	var refreshed, conflicts, unchanged, missing, failed int
+	var refreshed, conflicts, unchanged, missing, untracked, failed int
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -72,6 +72,10 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 		}
 		if outcome.Missing {
 			missing++
+			continue
+		}
+		if outcome.Untracked {
+			untracked++
 			continue
 		}
 		if outcome.Import == nil {
@@ -105,8 +109,8 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 	}
 	fmt.Fprintf(
 		d.Out,
-		"Checked %d %s: %d refreshed, %d conflicts skipped, %d unchanged, %d missing, %d failed\n",
-		len(candidates), sourceWord, refreshed, conflicts, unchanged, missing, failed,
+		"Checked %d %s: %d refreshed, %d conflicts skipped, %d unchanged, %d missing, %d untracked during refresh, %d failed\n",
+		len(candidates), sourceWord, refreshed, conflicts, unchanged, missing, untracked, failed,
 	)
 
 	if failed > 0 {

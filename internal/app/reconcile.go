@@ -11,11 +11,12 @@ import (
 )
 
 // candidateReconcileResult describes the source-side outcome of reconciling
-// one database-selected candidate. A nil Import with Missing false means the
-// source content already matches the selected snapshot.
+// one database-selected candidate. A nil Import with Missing and Untracked
+// both false means the source content already matches the selected snapshot.
 type candidateReconcileResult struct {
-	Import  *Result
-	Missing bool
+	Import    *Result
+	Missing   bool
+	Untracked bool
 }
 
 // reconcileWatchCandidate checks that the registered source identity is still
@@ -55,7 +56,7 @@ func reconcileWatchCandidate(
 
 	res, err := ImportWatchedSource(ctx, d, candidate.Source, policy)
 	if errors.Is(err, errSourceUntracked) {
-		return candidateReconcileResult{}, nil
+		return candidateReconcileResult{Untracked: true}, nil
 	}
 	if err != nil {
 		return candidateReconcileResult{}, err

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"md2obs/internal/database"
 	"md2obs/internal/watcher"
 )
 
@@ -49,7 +50,7 @@ func TestRunRefreshChangedAndUnchanged(t *testing.T) {
 	output := env.out.String()
 	for _, want := range []string{
 		"updated: " + changed,
-		"Checked 2 sources: 1 refreshed, 0 conflicts skipped, 1 unchanged, 0 missing, 0 failed",
+		"Checked 2 sources: 1 refreshed, 0 conflicts skipped, 1 unchanged, 0 missing, 0 untracked during refresh, 0 failed",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output does not contain %q:\n%s", want, output)
@@ -57,6 +58,37 @@ func TestRunRefreshChangedAndUnchanged(t *testing.T) {
 	}
 	if data, err := os.ReadFile(watcher.NotificationPath(env.deps.DB.Path)); err != nil || len(data) == 0 {
 		t.Fatalf("refresh notification = %q, err %v", data, err)
+	}
+}
+
+func TestReconcileWatchCandidateReportsSourceUntrackedAfterSelection(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "concurrently-untracked.md", "# original\n")
+	if _, err := ImportFile(ctx, env.deps, src, PolicyOverwrite); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := database.SelectAllWatchCandidates(ctx, env.deps.DB.Query(), env.deps.Config.VaultAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("selected %d candidates, want 1", len(candidates))
+	}
+	if err := os.WriteFile(src, []byte("# changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunUntrack(ctx, env.deps, UntrackOptions{Files: []string{src}}); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := reconcileWatchCandidate(ctx, env.deps, candidates[0], PolicySkip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Untracked || outcome.Missing || outcome.Import != nil {
+		t.Fatalf("reconcile outcome = %+v, want untracked", outcome)
 	}
 }
 
@@ -203,7 +235,7 @@ func TestRunRefreshContinuesPastMissingAndIdentityFailures(t *testing.T) {
 	output := env.out.String()
 	for _, want := range []string{
 		"error: refresh: source identity changed",
-		"Checked 3 sources: 1 refreshed, 0 conflicts skipped, 0 unchanged, 1 missing, 1 failed",
+		"Checked 3 sources: 1 refreshed, 0 conflicts skipped, 0 unchanged, 1 missing, 0 untracked during refresh, 1 failed",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output does not contain %q:\n%s", want, output)
