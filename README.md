@@ -86,6 +86,11 @@ when they return. If a source's directory disappears, the watcher retries for
 a short while and recovers on its own if the directory comes back; after
 that, import the file again or restart the watcher.
 
+On macOS, if a tracked source is replaced by a symlink and later restored as
+a regular file, the running watcher may not observe the restoration. The
+replacement symlink is still rejected; run `md2obs refresh` or restart
+`md2obs watch` after restoring the original path.
+
 Only one watcher can run per vault and state database. `--debounce DURATION`
 sets how long a change must settle before the copy is made (default 500ms).
 

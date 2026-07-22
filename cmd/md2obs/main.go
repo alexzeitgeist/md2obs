@@ -100,6 +100,10 @@ Options:
   --older-than AGE    Sources last imported more than AGE ago (such as 30d)
   --dry-run           Show what would change
 `,
+	"version": `Usage: md2obs version
+
+Print the installed version and source commit.
+`,
 	"debug list": `Usage: md2obs debug list
 
 List tracked sources and their latest vault paths.
@@ -141,6 +145,10 @@ func run(args []string) int {
 		fmt.Fprint(os.Stdout, usage)
 		return 0
 	case "version":
+		if len(commandArgs) == 1 && isHelpArg(commandArgs[0]) {
+			fmt.Fprint(os.Stdout, commandUsage["version"])
+			return 0
+		}
 		if len(commandArgs) != 0 {
 			fmt.Fprintln(os.Stderr, "md2obs: usage: md2obs version")
 			return 2

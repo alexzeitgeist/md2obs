@@ -152,6 +152,11 @@ func TestRunVersionBeforeLoadingConfig(t *testing.T) {
 		t.Fatalf("version = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 
+	code, stdout, stderr = captureRun(t, []string{"version", "--help"})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "Usage: md2obs version") {
+		t.Fatalf("version help = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+
 	code, stdout, stderr = captureRun(t, []string{"version", "extra"})
 	if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: md2obs version") {
 		t.Fatalf("version extra = %d, stdout = %q, stderr = %q", code, stdout, stderr)

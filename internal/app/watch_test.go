@@ -581,9 +581,6 @@ func TestWatchMissingActivationIsSilentAndRecreationWorks(t *testing.T) {
 }
 
 func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("fsnotify's kqueue backend follows a replacement symlink and cannot observe the link's removal")
-	}
 	env := newTestEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -625,6 +622,16 @@ func TestWatchDynamicIdentityChangeStaysEnrolled(t *testing.T) {
 	data, err := os.ReadFile(vaultAbs)
 	if err != nil || string(data) != "# original\n" {
 		t.Fatalf("replacement identity was imported: %q, err %v", data, err)
+	}
+	if runtime.GOOS == "darwin" {
+		// fsnotify's kqueue backend follows the replacement symlink and does
+		// not report its later removal. The rejection above remains covered;
+		// automatic restoration is a documented macOS limitation.
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("RunWatch: %v", err)
+		}
+		return
 	}
 
 	// Restoring the original canonical path must allow the retained enrollment

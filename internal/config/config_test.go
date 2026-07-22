@@ -200,6 +200,12 @@ func TestLoadFromFileAndEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := filepath.Base(configPath); got != "config.json" {
+		t.Fatalf("config filename = %q, want config.json", got)
+	}
+	if got := filepath.Base(filepath.Dir(configPath)); got != "md2obs" {
+		t.Fatalf("config directory = %q, want md2obs", got)
+	}
 	dir := filepath.Dir(configPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
