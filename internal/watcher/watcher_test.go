@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -620,6 +621,45 @@ func TestRunFailsWhenNotificationDirectoryCannotBeWatched(t *testing.T) {
 	}, discardLogger())
 	if err == nil {
 		t.Fatal("missing notification directory was accepted")
+	}
+}
+
+func TestRunFailsWhenNotificationDirectoryIsRenamed(t *testing.T) {
+	root := t.TempDir()
+	notificationParent := filepath.Join(root, "state")
+	if err := os.Mkdir(notificationParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan Stats, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			NotificationPath: filepath.Join(notificationParent, "state.db.watch-notify"),
+			SourceDebounce:   10 * time.Millisecond,
+			RefreshDebounce:  10 * time.Millisecond,
+			Load:             func() ([]string, error) { return nil, nil },
+			Handle:           func(string) {},
+			Ready:            func(stats Stats) { ready <- stats },
+		}, discardLogger())
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+
+	if err := os.Rename(notificationParent, notificationParent+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "notification directory") || !strings.Contains(err.Error(), "restart the watcher") {
+			t.Fatalf("Run error = %v, want notification-directory restart error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop after notification directory was renamed")
 	}
 }
 

@@ -261,6 +261,9 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				refreshDebouncer.Trigger(notificationPath)
 				continue
 			}
+			if clean == notificationParent && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				return fmt.Errorf("watch notification directory %s was removed or renamed; restart the watcher", notificationParent)
+			}
 			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && ix.HasParent(clean) {
 				if _, recovering := recoveringParents[clean]; !recovering {
 					stopParentRetry()
