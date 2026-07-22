@@ -82,6 +82,9 @@ Same-name files from different places get progressively more path context:
 `README.md`, `README--project-b.md`, `README--project-b--alex.md`, …, with a
 deterministic 6-hex-digit hash suffix as the final fallback. Explicit
 `import` always overwrites the vault copy, including edits made in Obsidian.
+An existing destination that is not owned by the state database is preserved;
+the new import uses the first free numbered name (`README-1.md`,
+`README-2.md`, …) instead.
 Generated filename components are capped at 255 bytes; overlong collision
 names are truncated on a UTF-8 boundary and retain the source hash.
 

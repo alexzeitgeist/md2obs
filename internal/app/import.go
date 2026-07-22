@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"md2obs/internal/database"
 	"md2obs/internal/layout"
@@ -37,6 +38,8 @@ const (
 )
 
 var errSourceUntracked = errors.New("source is no longer tracked")
+
+const maxVaultFilenameBytes = 255
 
 // ParsePolicy validates an --on-vault-change value.
 func ParsePolicy(s string) (Policy, error) {
@@ -320,10 +323,11 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	return res, nil
 }
 
-// reserveCandidate walks the layout's ordered candidates and picks the
-// first vault-relative path not owned by another materialization. Candidates
-// that fail the containment check are skipped rather than fatal because a
-// later candidate may still be valid.
+// reserveCandidate walks the layout's ordered candidates and picks the first
+// vault-relative path not owned by another materialization. An existing path
+// unknown to the database is preserved by allocating a numbered sibling.
+// Candidates that fail the containment check are skipped rather than fatal
+// because a later candidate may still be valid.
 func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, now time.Time, canonical string) (string, error) {
 	input := layout.CandidateInput{
 		SnapshotDate:  now,
@@ -336,26 +340,104 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 	if err != nil {
 		return "", err
 	}
-	validCandidates := 0
 	var containmentErr error
 	for _, rel := range candidates {
-		if _, err := materialize.WithinRoot(d.Config.VaultAbs, rel); err != nil {
-			containmentErr = err
-			continue
-		}
-		validCandidates++
 		owned, err := database.IsPathOwned(ctx, q, vaultID, rel)
 		if err != nil {
 			return "", err
 		}
-		if !owned {
-			return rel, nil
+		if owned {
+			continue
 		}
+
+		destAbs := filepath.Join(d.Config.VaultAbs, filepath.FromSlash(rel))
+		occupied, err := destinationOccupied(destAbs)
+		if err != nil {
+			return "", err
+		}
+		if occupied {
+			return reserveNumberedCandidate(ctx, d, q, vaultID, rel)
+		}
+		if _, err := materialize.WithinRoot(d.Config.VaultAbs, rel); err != nil {
+			containmentErr = err
+			continue
+		}
+		return rel, nil
 	}
-	if validCandidates == 0 && containmentErr != nil {
+	if containmentErr != nil {
 		return "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
 	}
 	return "", fmt.Errorf("no available destination filename for %s", canonical)
+}
+
+func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (string, error) {
+	for n := 1; ; n++ {
+		candidate, err := numberedCandidate(rel, n)
+		if err != nil {
+			return "", err
+		}
+		owned, err := database.IsPathOwned(ctx, q, vaultID, candidate)
+		if err != nil {
+			return "", err
+		}
+		if owned {
+			continue
+		}
+		destAbs := filepath.Join(d.Config.VaultAbs, filepath.FromSlash(candidate))
+		occupied, err := destinationOccupied(destAbs)
+		if err != nil {
+			return "", err
+		}
+		if occupied {
+			continue
+		}
+		if _, err := materialize.WithinRoot(d.Config.VaultAbs, candidate); err != nil {
+			return "", err
+		}
+		return candidate, nil
+	}
+}
+
+func destinationOccupied(destAbs string) (bool, error) {
+	_, err := os.Lstat(destAbs)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("inspect destination %s: %w", destAbs, err)
+	}
+}
+
+func numberedCandidate(rel string, n int) (string, error) {
+	if n < 1 {
+		return "", fmt.Errorf("invalid destination sequence %d", n)
+	}
+	name := path.Base(rel)
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	marker := fmt.Sprintf("-%d", n)
+	budget := maxVaultFilenameBytes - len(marker) - len(ext)
+	if budget < 1 {
+		return "", fmt.Errorf("no room for numbered destination based on %s", rel)
+	}
+	stem = strings.TrimRight(truncateUTF8Prefix(stem, budget), " .")
+	if stem == "" {
+		stem = "unnamed"
+	}
+	return path.Join(path.Dir(rel), stem+marker+ext), nil
+}
+
+func truncateUTF8Prefix(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
 }
 
 // printResult renders one import result with the arrow aligned under the

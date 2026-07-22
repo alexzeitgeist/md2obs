@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"md2obs/internal/config"
 	"md2obs/internal/database"
@@ -121,6 +123,96 @@ func TestImportFirst(t *testing.T) {
 	}
 	if got := env.vaultFile(t, res.RelPath); got != "# one\n" {
 		t.Errorf("vault content = %q", got)
+	}
+}
+
+func TestImportPreservesUnownedVaultFiles(t *testing.T) {
+	env := newTestEnv(t)
+	dateDir := filepath.Join(env.vault, "_External", "2026-07-20")
+	if err := os.MkdirAll(dateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"README.md":   "# manual\n",
+		"README-1.md": "# restored\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dateDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := writeSource(t, t.TempDir(), "README.md", "# source\n")
+
+	res, err := ImportFile(context.Background(), env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "_External/2026-07-20/README-2.md"; res.RelPath != want {
+		t.Fatalf("relative path = %q, want %q", res.RelPath, want)
+	}
+	if got := env.vaultFile(t, "_External/2026-07-20/README.md"); got != "# manual\n" {
+		t.Fatalf("unowned vault file changed to %q", got)
+	}
+	if got := env.vaultFile(t, "_External/2026-07-20/README-1.md"); got != "# restored\n" {
+		t.Fatalf("numbered vault file changed to %q", got)
+	}
+	if got := env.vaultFile(t, res.RelPath); got != "# source\n" {
+		t.Fatalf("imported content = %q", got)
+	}
+}
+
+func TestImportPreservesUnownedVaultSymlink(t *testing.T) {
+	env := newTestEnv(t)
+	dateDir := filepath.Join(env.vault, "_External", "2026-07-20")
+	if err := os.MkdirAll(dateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "manual.md")
+	if err := os.WriteFile(target, []byte("# manual\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	occupied := filepath.Join(dateDir, "note.md")
+	if err := os.Symlink(target, occupied); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	src := writeSource(t, t.TempDir(), "note.md", "# source\n")
+
+	res, err := ImportFile(context.Background(), env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "_External/2026-07-20/note-1.md"; res.RelPath != want {
+		t.Fatalf("relative path = %q, want %q", res.RelPath, want)
+	}
+	info, err := os.Lstat(occupied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("unowned vault symlink was replaced")
+	}
+	if got := env.vaultFile(t, res.RelPath); got != "# source\n" {
+		t.Fatalf("imported content = %q", got)
+	}
+}
+
+func TestNumberedCandidateStaysWithinFilenameLimit(t *testing.T) {
+	name := strings.Repeat("é", 126) + ".md"
+	if len(name) != maxVaultFilenameBytes {
+		t.Fatalf("test filename is %d bytes", len(name))
+	}
+	got, err := numberedCandidate(path.Join("_External/2026-07-20", name), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := path.Base(got)
+	if len(base) > maxVaultFilenameBytes {
+		t.Fatalf("numbered filename is %d bytes", len(base))
+	}
+	if !utf8.ValidString(base) {
+		t.Fatalf("numbered filename is not valid UTF-8: %q", base)
+	}
+	if !strings.HasSuffix(base, "-1.md") {
+		t.Fatalf("numbered filename = %q", base)
 	}
 }
 
