@@ -109,7 +109,7 @@ func runNamedUntrack(ctx context.Context, d *Deps, opts UntrackOptions, vaultID 
 		notifyUntrack(d)
 	}
 	if failed > 0 {
-		return fmt.Errorf("%d of %d sources could not be untracked", failed, len(opts.Files))
+		return fmt.Errorf("%d of %d untrack arguments failed", failed, len(opts.Files))
 	}
 	return nil
 }
