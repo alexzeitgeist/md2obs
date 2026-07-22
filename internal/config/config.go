@@ -176,16 +176,8 @@ func (c *Config) Validate() error {
 		}
 	}
 	c.RootDirectory = root
-	destResolved, err := safepath.ResolveExistingAncestor(c.DestRootAbs())
-	if err != nil {
-		return fmt.Errorf("resolve destination root %s: %w", c.DestRootAbs(), err)
-	}
-	destInside, err := safepath.Within(c.VaultAbs, destResolved, false)
-	if err != nil {
-		return err
-	}
-	if !destInside {
-		return fmt.Errorf("destination root %s resolves outside the vault %s", c.DestRootAbs(), c.VaultAbs)
+	if _, err := safepath.WithinRoot(c.VaultAbs, root); err != nil {
+		return fmt.Errorf("destination root %s: %w", c.DestRootAbs(), err)
 	}
 
 	if c.StateDBPath == "" {

@@ -118,7 +118,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 			if armErr != nil {
 				continue
 			}
-			_, exists := ix.Match(clean)
+			exists := ix.Has(clean)
 			if !exists && !ix.Add(clean) {
 				continue
 			}
@@ -273,8 +273,8 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				continue
 			}
 			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0 {
-				if path, matched := ix.Match(clean); matched {
-					sourceDebouncer.Trigger(path)
+				if ix.Has(clean) {
+					sourceDebouncer.Trigger(clean)
 				}
 			}
 		case err, ok := <-w.Errors:
@@ -288,7 +288,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				logger.Error("filesystem watcher error", "err", err)
 			}
 		case path := <-sourceDebouncer.C:
-			if _, matched := ix.Match(path); matched {
+			if ix.Has(path) {
 				opts.Handle(path)
 			}
 		case <-refreshDebouncer.C:

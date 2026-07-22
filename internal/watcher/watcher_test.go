@@ -29,19 +29,19 @@ func TestIndexExactPathFiltering(t *testing.T) {
 		t.Errorf("Parents = %v, want %v", ix.Parents(), want)
 	}
 
-	if _, ok := ix.Match("/home/alice/project-a/README.md"); !ok {
+	if !ix.Has("/home/alice/project-a/README.md") {
 		t.Error("exact path did not match")
 	}
 	// Cleaning: an event path with a redundant segment still matches.
-	if _, ok := ix.Match("/home/alice/project-a/./README.md"); !ok {
+	if !ix.Has("/home/alice/project-a/./README.md") {
 		t.Error("uncleaned event path did not match")
 	}
 	// Unrelated files in a watched directory never match.
-	if _, ok := ix.Match("/home/alice/project-a/new.md"); ok {
+	if ix.Has("/home/alice/project-a/new.md") {
 		t.Error("unregistered file matched")
 	}
 	// Same basename in a nested (unwatched) directory never matches.
-	if _, ok := ix.Match("/home/alice/project-a/docs/README.md"); ok {
+	if ix.Has("/home/alice/project-a/docs/README.md") {
 		t.Error("nested file matched")
 	}
 }
@@ -67,7 +67,7 @@ func TestIndexDynamicAdditionIsIdempotent(t *testing.T) {
 	if !reflect.DeepEqual(ix.Parents(), wantParents) {
 		t.Errorf("Parents = %v, want %v", ix.Parents(), wantParents)
 	}
-	if _, ok := ix.Match("/home/alice/project-a/unrelated.md"); ok {
+	if ix.Has("/home/alice/project-a/unrelated.md") {
 		t.Error("dynamic parent caused unrelated path to match")
 	}
 	if !ix.Remove("/home/alice/project-a/two.md") {
@@ -250,25 +250,23 @@ func TestDebouncerCancelPath(t *testing.T) {
 	}
 }
 
-func TestDebouncerIgnoresStaleGeneration(t *testing.T) {
+func TestDebouncerIgnoresStaleTimer(t *testing.T) {
 	d := NewDebouncer(time.Hour)
 	defer d.Stop()
 
 	const path = "/a/x.md"
 	d.Trigger(path)
-
 	d.mu.Lock()
-	entry := d.timers[path]
-	staleGeneration := entry.generation
-	entry.generation++
+	stale := d.timers[path]
 	d.mu.Unlock()
+	d.Trigger(path)
 
 	// This models an expired AfterFunc callback that was already queued when a
-	// newer event advanced the source's timer generation.
-	d.fire(path, entry, staleGeneration)
+	// newer event replaced the source's timer entry.
+	d.fire(path, stale)
 	select {
 	case got := <-d.C:
-		t.Fatalf("stale generation fired for %q", got)
+		t.Fatalf("stale timer fired for %q", got)
 	default:
 	}
 }

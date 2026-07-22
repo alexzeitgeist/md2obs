@@ -229,6 +229,27 @@ func selectTrackingEntries(ctx context.Context, q Querier, vaultKey, canonicalPa
 // inclusive date range was materialized in vaultKey. A snapshot belonging
 // only to another vault never confers watch membership.
 func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, toDate string) ([]WatchCandidate, error) {
+	return selectWatchCandidates(ctx, q, vaultKey, fromDate, toDate)
+}
+
+// SelectAllWatchCandidates returns every source currently tracked in vaultKey,
+// together with its newest materialized snapshot in that vault.
+func SelectAllWatchCandidates(ctx context.Context, q Querier, vaultKey string) ([]WatchCandidate, error) {
+	return selectWatchCandidates(ctx, q, vaultKey, "", "")
+}
+
+func selectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, toDate string) ([]WatchCandidate, error) {
+	outerFilter, innerFilter := "", ""
+	args := []any{vaultKey}
+	if fromDate != "" || toDate != "" {
+		outerFilter = `
+		  AND sn.snapshot_date >= ?
+		  AND sn.snapshot_date <= ?`
+		innerFilter = `
+		        AND sn2.snapshot_date >= ?
+		        AND sn2.snapshot_date <= ?`
+		args = append(args, fromDate, toDate, fromDate, toDate)
+	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 		    s.source_id,
@@ -245,19 +266,15 @@ func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 		    ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v
 		    ON v.vault_id = m.vault_id
-		WHERE v.vault_key = ?
-		  AND sn.snapshot_date >= ?
-		  AND sn.snapshot_date <= ?
+		WHERE v.vault_key = ?`+outerFilter+`
 		  AND sn.snapshot_date = (
 		      SELECT MAX(sn2.snapshot_date)
 		      FROM snapshots AS sn2
 		      JOIN materializations AS m2
 		          ON m2.snapshot_id = sn2.snapshot_id
 		      WHERE sn2.source_id = s.source_id
-		        AND m2.vault_id = v.vault_id
-		        AND sn2.snapshot_date >= ?
-		        AND sn2.snapshot_date <= ?)
-		ORDER BY s.canonical_path`, vaultKey, fromDate, toDate, fromDate, toDate)
+		        AND m2.vault_id = v.vault_id`+innerFilter+`)
+		ORDER BY s.canonical_path`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select watch candidates for vault %s: %w", vaultKey, err)
 	}
@@ -274,56 +291,6 @@ func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 			&candidate.ContentSHA,
 		); err != nil {
 			return nil, fmt.Errorf("scan watch candidate: %w", err)
-		}
-		candidates = append(candidates, candidate)
-	}
-	return candidates, rows.Err()
-}
-
-// SelectAllWatchCandidates returns every source currently tracked in vaultKey,
-// together with its newest materialized snapshot in that vault.
-func SelectAllWatchCandidates(ctx context.Context, q Querier, vaultKey string) ([]WatchCandidate, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT
-		    s.source_id,
-		    s.canonical_path,
-		    s.display_path,
-		    sn.snapshot_date,
-		    r.content_sha256
-		FROM sources AS s
-		JOIN snapshots AS sn
-		    ON sn.source_id = s.source_id
-		JOIN revisions AS r
-		    ON r.revision_id = sn.revision_id
-		JOIN materializations AS m
-		    ON m.snapshot_id = sn.snapshot_id
-		JOIN vaults AS v
-		    ON v.vault_id = m.vault_id
-		WHERE v.vault_key = ?
-		  AND sn.snapshot_date = (
-		      SELECT MAX(sn2.snapshot_date)
-		      FROM snapshots AS sn2
-		      JOIN materializations AS m2
-		          ON m2.snapshot_id = sn2.snapshot_id
-		      WHERE sn2.source_id = s.source_id
-		        AND m2.vault_id = v.vault_id)
-		ORDER BY s.canonical_path`, vaultKey)
-	if err != nil {
-		return nil, fmt.Errorf("select all watch candidates for vault %s: %w", vaultKey, err)
-	}
-	defer rows.Close()
-
-	var candidates []WatchCandidate
-	for rows.Next() {
-		var candidate WatchCandidate
-		if err := rows.Scan(
-			&candidate.ID,
-			&candidate.CanonicalPath,
-			&candidate.DisplayPath,
-			&candidate.SnapshotDate,
-			&candidate.ContentSHA,
-		); err != nil {
-			return nil, fmt.Errorf("scan all watch candidates: %w", err)
 		}
 		candidates = append(candidates, candidate)
 	}

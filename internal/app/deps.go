@@ -3,6 +3,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"md2obs/internal/config"
 	"md2obs/internal/database"
 	"md2obs/internal/layout"
+	"md2obs/internal/watcher"
 )
 
 // Deps carries everything a command needs. Now is injectable so tests can
@@ -44,3 +46,19 @@ func (d *Deps) logger() *slog.Logger {
 const dateFormat = "2006-01-02"
 
 func utc(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// plural returns one when n is 1 and many otherwise.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// notifyWatchers signals running watchers that vault membership or content
+// changed; event names what succeeded, for the warning if the signal fails.
+func notifyWatchers(d *Deps, event string) {
+	if err := watcher.NotifyImport(d.DB.Path); err != nil {
+		fmt.Fprintf(d.Err, "warning: %s, but running watchers may need to be restarted: %v\n", event, err)
+	}
+}

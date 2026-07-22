@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"md2obs/internal/config"
 	"md2obs/internal/database"
@@ -192,27 +190,6 @@ func TestImportPreservesUnownedVaultSymlink(t *testing.T) {
 	}
 	if got := env.vaultFile(t, res.RelPath); got != "# source\n" {
 		t.Fatalf("imported content = %q", got)
-	}
-}
-
-func TestNumberedCandidateStaysWithinFilenameLimit(t *testing.T) {
-	name := strings.Repeat("é", 126) + ".md"
-	if len(name) != maxVaultFilenameBytes {
-		t.Fatalf("test filename is %d bytes", len(name))
-	}
-	got, err := numberedCandidate(path.Join("_External/2026-07-20", name), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := path.Base(got)
-	if len(base) > maxVaultFilenameBytes {
-		t.Fatalf("numbered filename is %d bytes", len(base))
-	}
-	if !utf8.ValidString(base) {
-		t.Fatalf("numbered filename is not valid UTF-8: %q", base)
-	}
-	if !strings.HasSuffix(base, "-1.md") {
-		t.Fatalf("numbered filename = %q", base)
 	}
 }
 

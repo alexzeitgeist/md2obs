@@ -22,28 +22,32 @@ type candidateReconcileResult struct {
 // reconcileWatchCandidate checks that the registered source identity is still
 // intact, compares its current content with the selected snapshot, and imports
 // only when the content differs. Watch activation and one-shot refresh share
-// this path so their identity and hash gates cannot drift apart.
+// this path so their identity and hash gates cannot drift apart. The facts
+// gathered here are handed to importFile so the source is read and hashed
+// only once per reconciliation.
 func reconcileWatchCandidate(
 	ctx context.Context,
 	d *Deps,
 	candidate database.WatchCandidate,
 	policy Policy,
 ) (candidateReconcileResult, error) {
-	canonical, _, err := source.Canonicalize(candidate.CanonicalPath)
+	if err := source.VerifyRegisteredIdentity(candidate.CanonicalPath); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return candidateReconcileResult{Missing: true}, nil
+		case errors.Is(err, source.ErrSourceIdentityChanged):
+			return candidateReconcileResult{}, err
+		}
+		return candidateReconcileResult{}, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
+	}
+	info, err := source.Inspect(candidate.CanonicalPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return candidateReconcileResult{Missing: true}, nil
 		}
 		return candidateReconcileResult{}, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
 	}
-	if canonical != candidate.CanonicalPath {
-		return candidateReconcileResult{}, fmt.Errorf(
-			"source identity changed: registered %s now resolves to %s",
-			candidate.CanonicalPath,
-			canonical,
-		)
-	}
-	_, sha, err := source.ReadAndHash(canonical)
+	content, sha, err := source.ReadAndHash(candidate.CanonicalPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return candidateReconcileResult{Missing: true}, nil
@@ -54,7 +58,8 @@ func reconcileWatchCandidate(
 		return candidateReconcileResult{}, nil
 	}
 
-	res, err := ImportWatchedSource(ctx, d, candidate.Source, policy)
+	facts := &sourceFacts{info: info, content: content, sha: sha}
+	res, err := importFile(ctx, d, candidate.CanonicalPath, policy, &candidate.Source, facts)
 	if errors.Is(err, errSourceUntracked) {
 		return candidateReconcileResult{Untracked: true}, nil
 	}

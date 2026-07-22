@@ -2,9 +2,14 @@
 package source
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 )
+
+// ErrSourceIdentityChanged reports that a registered canonical path no longer
+// resolves to itself, e.g. because a symlink was retargeted.
+var ErrSourceIdentityChanged = errors.New("source identity changed")
 
 // Canonicalize resolves a user-supplied path to its canonical absolute form
 // (symlinks resolved), which is the source identity, plus a display path
@@ -19,6 +24,20 @@ func Canonicalize(p string) (canonical, display string, err error) {
 		return "", "", fmt.Errorf("resolve %s: %w", abs, err)
 	}
 	return resolved, abs, nil
+}
+
+// VerifyRegisteredIdentity re-resolves a registered canonical path and errors
+// when it no longer resolves to itself. Resolution failures are returned as-is
+// (os.ErrNotExist stays detectable); a mismatch wraps ErrSourceIdentityChanged.
+func VerifyRegisteredIdentity(registered string) error {
+	canonical, _, err := Canonicalize(registered)
+	if err != nil {
+		return err
+	}
+	if canonical != filepath.Clean(registered) {
+		return fmt.Errorf("%w: registered %s now resolves to %s", ErrSourceIdentityChanged, registered, canonical)
+	}
+	return nil
 }
 
 // ParentParts returns the parent directory names of a canonical path,

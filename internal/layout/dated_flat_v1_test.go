@@ -182,3 +182,24 @@ func TestLongCandidatesStayWithinComponentLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestNumberedSiblingStaysWithinFilenameLimit(t *testing.T) {
+	name := strings.Repeat("é", 126) + ".md"
+	if len(name) != maxFilenameBytes {
+		t.Fatalf("test filename is %d bytes", len(name))
+	}
+	got, err := NumberedSibling(path.Join("_External/2026-07-20", name), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := path.Base(got)
+	if len(base) > maxFilenameBytes {
+		t.Fatalf("numbered filename is %d bytes", len(base))
+	}
+	if !utf8.ValidString(base) {
+		t.Fatalf("numbered filename is not valid UTF-8: %q", base)
+	}
+	if !strings.HasSuffix(base, "-1.md") {
+		t.Fatalf("numbered filename = %q", base)
+	}
+}

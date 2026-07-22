@@ -13,7 +13,6 @@ import (
 type Index struct {
 	sources    map[string]struct{}
 	parentRefs map[string]int
-	parents    []string
 }
 
 // NewIndex builds the exact-path set and the deduplicated list of immediate
@@ -38,12 +37,7 @@ func (ix *Index) Add(path string) bool {
 		return false
 	}
 	ix.sources[clean] = struct{}{}
-	parent := filepath.Dir(clean)
-	if ix.parentRefs[parent] == 0 {
-		ix.parents = append(ix.parents, parent)
-		sort.Strings(ix.parents)
-	}
-	ix.parentRefs[parent]++
+	ix.parentRefs[filepath.Dir(clean)]++
 	return true
 }
 
@@ -61,13 +55,6 @@ func (ix *Index) Remove(path string) bool {
 	ix.parentRefs[parent]--
 	if ix.parentRefs[parent] == 0 {
 		delete(ix.parentRefs, parent)
-		for i, indexedParent := range ix.parents {
-			if indexedParent != parent {
-				continue
-			}
-			ix.parents = append(ix.parents[:i], ix.parents[i+1:]...)
-			break
-		}
 	}
 	return true
 }
@@ -88,16 +75,21 @@ func (ix *Index) Paths() []string {
 	return paths
 }
 
-// Match reports whether an event path is one of the selected sources,
-// returning its cleaned form.
-func (ix *Index) Match(eventPath string) (string, bool) {
-	clean := filepath.Clean(eventPath)
-	_, ok := ix.sources[clean]
-	return clean, ok
+// Has reports whether an event path is one of the selected sources.
+func (ix *Index) Has(eventPath string) bool {
+	_, ok := ix.sources[filepath.Clean(eventPath)]
+	return ok
 }
 
 // Parents returns the distinct immediate parent directories, sorted.
-func (ix *Index) Parents() []string { return ix.parents }
+func (ix *Index) Parents() []string {
+	parents := make([]string, 0, len(ix.parentRefs))
+	for parent := range ix.parentRefs {
+		parents = append(parents, parent)
+	}
+	sort.Strings(parents)
+	return parents
+}
 
 // Len returns the number of selected sources.
 func (ix *Index) Len() int { return len(ix.sources) }

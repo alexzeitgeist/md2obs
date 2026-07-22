@@ -487,16 +487,13 @@ func TestTrackingEntriesAndListAreVaultScoped(t *testing.T) {
 		t.Fatalf("display-path lookup = %+v, err %v", entries, err)
 	}
 
-	preview, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if preview != (ForgetResult{MaterializationsDeleted: 1}) {
-		t.Fatalf("preview = %+v", preview)
+	wouldChange, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil || !wouldChange {
+		t.Fatalf("preview = %v, err %v, want tracked materialization", wouldChange, err)
 	}
 	forgotten, err := ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
-	if err != nil || forgotten != preview {
-		t.Fatalf("forgotten = %+v, preview %+v, err %v", forgotten, preview, err)
+	if err != nil || forgotten != (ForgetResult{MaterializationsDeleted: 1}) {
+		t.Fatalf("forgotten = %+v, err %v", forgotten, err)
 	}
 	if tracked, err := IsSourceTrackedInVault(ctx, q, sourceID, vaultA); err != nil || tracked {
 		t.Fatalf("vault-A tracked = %v, err %v", tracked, err)
@@ -543,12 +540,9 @@ func TestForgetSourceInVaultUsesPredicatesAndReportsExactGC(t *testing.T) {
 	CreateMaterialization(ctx, q, s2, vaultA, layoutID, "_External/a/20.md", r2, "t")
 	CreateMaterialization(ctx, q, s3, vaultB, layoutID, "_External/b/21.md", r3, "t")
 
-	preview, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := (ForgetResult{MaterializationsDeleted: 2, SnapshotsDeleted: 1, RevisionsDeleted: 1}); preview != want {
-		t.Fatalf("vault-A preview = %+v, want %+v", preview, want)
+	wouldChange, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil || !wouldChange {
+		t.Fatalf("vault-A preview = %v, err %v, want tracked materializations", wouldChange, err)
 	}
 
 	// Simulate an import committed after untrack selection/dry-run but before
@@ -572,16 +566,16 @@ func TestForgetSourceInVaultUsesPredicatesAndReportsExactGC(t *testing.T) {
 	}
 	assertDatabaseIntegrity(t, q)
 
-	preview, err = PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
+	wouldChange, err = PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
+	if err != nil || !wouldChange {
+		t.Fatalf("vault-B preview = %v, err %v, want tracked materializations", wouldChange, err)
+	}
+	forgotten, err = ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (ForgetResult{MaterializationsDeleted: 2, SnapshotsDeleted: 2, RevisionsDeleted: 2, SourceDeleted: true}); preview != want {
-		t.Fatalf("vault-B preview = %+v, want %+v", preview, want)
-	}
-	forgotten, err = ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
-	if err != nil || forgotten != preview {
-		t.Fatalf("vault-B forgotten = %+v, preview %+v, err %v", forgotten, preview, err)
+	if want := (ForgetResult{MaterializationsDeleted: 2, SnapshotsDeleted: 2, RevisionsDeleted: 2, SourceDeleted: true}); forgotten != want {
+		t.Fatalf("vault-B forgotten = %+v, want %+v", forgotten, want)
 	}
 	assertDatabaseIntegrity(t, q)
 	if sources, snapshots, materializations, err := db.Counts(ctx); err != nil || sources != 0 || snapshots != 0 || materializations != 0 {

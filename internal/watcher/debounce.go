@@ -20,8 +20,7 @@ type Debouncer struct {
 }
 
 type timerEntry struct {
-	timer      *time.Timer
-	generation uint64
+	timer *time.Timer
 }
 
 func NewDebouncer(interval time.Duration) *Debouncer {
@@ -33,23 +32,21 @@ func NewDebouncer(interval time.Duration) *Debouncer {
 	}
 }
 
-// Trigger records an event for path, starting or resetting its timer.
+// Trigger records an event for path, replacing any pending timer with a fresh
+// entry. A queued expiry for a replaced entry is detected in fire by pointer
+// identity.
 func (d *Debouncer) Trigger(path string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.stopped {
 		return
 	}
-	entry, ok := d.timers[path]
-	if !ok {
-		entry = &timerEntry{}
-		d.timers[path] = entry
-	} else {
-		entry.timer.Stop()
+	if current, ok := d.timers[path]; ok {
+		current.timer.Stop()
 	}
-	entry.generation++
-	generation := entry.generation
-	entry.timer = time.AfterFunc(d.interval, func() { d.fire(path, entry, generation) })
+	entry := &timerEntry{}
+	entry.timer = time.AfterFunc(d.interval, func() { d.fire(path, entry) })
+	d.timers[path] = entry
 }
 
 // Cancel prevents a pending timer for path from firing. A path already queued
@@ -65,14 +62,9 @@ func (d *Debouncer) Cancel(path string) {
 	delete(d.timers, path)
 }
 
-func (d *Debouncer) fire(path string, entry *timerEntry, generation uint64) {
+func (d *Debouncer) fire(path string, entry *timerEntry) {
 	d.mu.Lock()
-	if d.stopped {
-		d.mu.Unlock()
-		return
-	}
-	current, ok := d.timers[path]
-	if !ok || current != entry || current.generation != generation {
+	if d.stopped || d.timers[path] != entry {
 		d.mu.Unlock()
 		return
 	}

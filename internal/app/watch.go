@@ -138,15 +138,9 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			delete(selected, p)
 		},
 		Ready: func(stats watcher.Stats) {
-			sourceWord := "sources"
-			if stats.Sources == 1 {
-				sourceWord = "source"
-			}
-			directoryWord := "directories"
-			if stats.Directories == 1 {
-				directoryWord = "directory"
-			}
-			fmt.Fprintf(d.Out, "Watching %d %s in %d %s\n", stats.Sources, sourceWord, stats.Directories, directoryWord)
+			fmt.Fprintf(d.Out, "Watching %d %s in %d %s\n",
+				stats.Sources, plural(stats.Sources, "source", "sources"),
+				stats.Directories, plural(stats.Directories, "directory", "directories"))
 			fmt.Fprintf(d.Out, "Import dates: %s to %s\n", discoveryFrom, discoveryTo)
 		},
 	}, d.logger())

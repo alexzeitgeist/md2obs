@@ -72,7 +72,7 @@ func TestParseRefreshOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := app.RefreshOptions{All: true, OnVaultChange: app.PolicyPreserve}
+	want := app.RefreshOptions{Days: 1, All: true, OnVaultChange: app.PolicyPreserve}
 	if got.refresh != want {
 		t.Fatalf("refresh options = %+v, want %+v", got.refresh, want)
 	}

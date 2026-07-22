@@ -5,14 +5,16 @@ import (
 	"fmt"
 
 	"md2obs/internal/database"
-	"md2obs/internal/watcher"
 )
 
 // RefreshOptions are the validated `md2obs refresh` flags.
 type RefreshOptions struct {
-	// Days is the inclusive local calendar-day window. It is zero when All is
-	// selected.
+	// Days is the inclusive local calendar-day window. It is ignored when All
+	// is selected.
 	Days int
+	// DaysSet records that --days was given explicitly, so combining it with
+	// --all can be rejected while the flag default is tolerated.
+	DaysSet bool
 	// All selects every source currently tracked in the configured vault.
 	All bool
 	// OnVaultChange decides what happens when a changed source would overwrite
@@ -24,7 +26,7 @@ type RefreshOptions struct {
 // filesystem.
 func (o RefreshOptions) Validate() error {
 	if o.All {
-		if o.Days != 0 {
+		if o.DaysSet {
 			return fmt.Errorf("--all cannot be combined with --days")
 		}
 	} else if o.Days < 1 {
@@ -99,18 +101,12 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 	// to let a running watcher retry directory watches. A notification failure
 	// does not undo successful imports.
 	if len(candidates) > 0 {
-		if err := watcher.NotifyImport(d.DB.Path); err != nil {
-			fmt.Fprintf(d.Err, "warning: refresh completed, but running watchers may need to be restarted: %v\n", err)
-		}
-	}
-	sourceWord := "sources"
-	if len(candidates) == 1 {
-		sourceWord = "source"
+		notifyWatchers(d, "refresh completed")
 	}
 	fmt.Fprintf(
 		d.Out,
 		"Checked %d %s: %d refreshed, %d conflicts skipped, %d unchanged, %d missing, %d untracked during refresh, %d failed\n",
-		len(candidates), sourceWord, refreshed, conflicts, unchanged, missing, untracked, failed,
+		len(candidates), plural(len(candidates), "source", "sources"), refreshed, conflicts, unchanged, missing, untracked, failed,
 	)
 
 	if failed > 0 {

@@ -12,13 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"md2obs/internal/database"
 	"md2obs/internal/layout"
 	"md2obs/internal/materialize"
+	"md2obs/internal/safepath"
 	"md2obs/internal/source"
-	"md2obs/internal/watcher"
 )
 
 // Policy decides what happens when the vault copy about to be overwritten
@@ -38,8 +37,6 @@ const (
 )
 
 var errSourceUntracked = errors.New("source is no longer tracked")
-
-const maxVaultFilenameBytes = 255
 
 // ParsePolicy validates an --on-vault-change value.
 func ParsePolicy(s string) (Policy, error) {
@@ -80,9 +77,9 @@ func RunImport(ctx context.Context, d *Deps, files []string) error {
 			continue
 		}
 		printResult(d.Out, res)
-		if err := watcher.NotifyImport(d.DB.Path); err != nil {
-			fmt.Fprintf(d.Err, "warning: import succeeded, but running watchers may need to be restarted: %v\n", err)
-		}
+	}
+	if failed < len(files) {
+		notifyWatchers(d, "import succeeded")
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d imports failed", failed, len(files))
@@ -92,7 +89,7 @@ func RunImport(ctx context.Context, d *Deps, files []string) error {
 
 // ImportFile runs the full explicit import operation for one source file.
 func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Result, error) {
-	return importFile(ctx, d, file, policy, nil)
+	return importFile(ctx, d, file, policy, nil, nil)
 }
 
 // ImportWatchedSource imports a source selected from SQLite at watcher
@@ -100,7 +97,16 @@ func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Resul
 // identity; the watcher is never allowed to register a different source or
 // recreate bookkeeping that an explicit untrack removed concurrently.
 func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Source, policy Policy) (Result, error) {
-	return importFile(ctx, d, registered.CanonicalPath, policy, &registered)
+	return importFile(ctx, d, registered.CanonicalPath, policy, &registered, nil)
+}
+
+// sourceFacts carries one verified inspect-and-read of a source so a caller
+// that already gathered them (the reconcile path) does not resolve, read, and
+// hash the same file a second time inside importFile.
+type sourceFacts struct {
+	info    source.Info
+	content []byte
+	sha     string
 }
 
 // importFile resolves and hashes a source, updates its revision and snapshot
@@ -108,27 +114,38 @@ func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Sourc
 // and commits the database transaction. A successful physical rename can
 // outlive a later database failure; retrying the import converges on the
 // source's current content.
-func importFile(ctx context.Context, d *Deps, file string, policy Policy, registered *database.Source) (Result, error) {
-	canonical, display, err := source.Canonicalize(file)
-	if err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", file, err)
-	}
+func importFile(ctx context.Context, d *Deps, file string, policy Policy, registered *database.Source, facts *sourceFacts) (Result, error) {
+	var canonical, display string
 	if registered != nil {
-		if canonical != registered.CanonicalPath {
-			return Result{}, fmt.Errorf("source identity changed: registered %s now resolves to %s", registered.CanonicalPath, canonical)
+		// facts != nil means reconcileWatchCandidate already verified the
+		// registered identity for this operation.
+		if facts == nil {
+			if err := source.VerifyRegisteredIdentity(registered.CanonicalPath); err != nil {
+				return Result{}, err
+			}
 		}
-		display = registered.DisplayPath
+		canonical, display = registered.CanonicalPath, registered.DisplayPath
+	} else {
+		var err error
+		canonical, display, err = source.Canonicalize(file)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", file, err)
+		}
 	}
 	res := Result{DisplayPath: display}
 
-	info, err := source.Inspect(canonical)
-	if err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", display, err)
+	if facts == nil {
+		info, err := source.Inspect(canonical)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		content, sha, err := source.ReadAndHash(canonical)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		facts = &sourceFacts{info: info, content: content, sha: sha}
 	}
-	content, sha, err := source.ReadAndHash(canonical)
-	if err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", display, err)
-	}
+	info, content, sha := facts.info, facts.content, facts.sha
 
 	now := d.Now()
 	date := now.Format(dateFormat)
@@ -192,8 +209,15 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
 	var mat *database.Materialization
+	var matDestAbs string
 	if snap != nil {
 		mat, err = database.GetMaterialization(ctx, tx, snap.ID, vaultID)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+	}
+	if mat != nil {
+		matDestAbs, err = safepath.WithinRoot(vaultRoot, mat.RelativePath)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
@@ -203,11 +227,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// same revision. Merely finding the destination is insufficient because an
 	// Obsidian edit may have changed its content since md2obs last wrote it.
 	if snap != nil && snap.RevisionID == revID && mat != nil && mat.WrittenRevisionID == revID {
-		destAbs, err := materialize.WithinRoot(vaultRoot, mat.RelativePath)
-		if err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-		current, readErr := os.ReadFile(destAbs)
+		current, readErr := os.ReadFile(matDestAbs)
 		if readErr == nil && source.HashBytes(current) == sha {
 			if err := tx.Commit(); err != nil {
 				return Result{}, fmt.Errorf("import %s: commit: %w", display, err)
@@ -225,11 +245,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// compare the current vault content with the revision last written. A
 	// mismatch means someone edited the vault copy since the last import.
 	if mat != nil && policy != PolicyOverwrite {
-		destAbs, err := materialize.WithinRoot(vaultRoot, mat.RelativePath)
-		if err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-		current, readErr := os.ReadFile(destAbs)
+		current, readErr := os.ReadFile(matDestAbs)
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return Result{}, fmt.Errorf("import %s: read vault copy: %w", display, readErr)
 		}
@@ -290,11 +306,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// Materialize: reuse the reserved path, or reserve the first free
 	// layout candidate.
 	if mat != nil {
-		destAbs, err := materialize.WithinRoot(vaultRoot, mat.RelativePath)
-		if err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-		if err := materialize.WriteAtomic(destAbs, content, 0o644); err != nil {
+		if err := materialize.WriteAtomic(matDestAbs, content, 0o644); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 		if err := database.UpdateMaterializationWritten(ctx, tx, mat.ID, revID, nowUTC); err != nil {
@@ -302,11 +314,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		}
 		res.RelPath = mat.RelativePath
 	} else {
-		relPath, err := reserveCandidate(ctx, d, tx, vaultID, now, canonical)
-		if err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-		destAbs, err := materialize.WithinRoot(vaultRoot, relPath)
+		relPath, destAbs, err := reserveCandidate(ctx, d, tx, vaultID, now, canonical)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
@@ -331,11 +339,12 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 }
 
 // reserveCandidate walks the layout's ordered candidates and picks the first
-// vault-relative path not owned by another materialization. An existing path
-// unknown to the database is preserved by allocating a numbered sibling.
-// Candidates that fail the containment check are skipped rather than fatal
-// because a later candidate may still be valid.
-func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, now time.Time, canonical string) (string, error) {
+// vault-relative path not owned by another materialization, returning it with
+// its containment-checked absolute destination. An existing path unknown to
+// the database is preserved by allocating a numbered sibling. Candidates that
+// fail the containment check are skipped rather than fatal because a later
+// candidate may still be valid.
+func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, now time.Time, canonical string) (string, string, error) {
 	input := layout.CandidateInput{
 		SnapshotDate:  now,
 		SourcePath:    canonical,
@@ -345,64 +354,68 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 	}
 	candidates, err := d.Layout.CandidatePaths(input)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var containmentErr error
 	for _, rel := range candidates {
-		owned, err := database.IsPathOwned(ctx, q, vaultID, rel)
-		if err != nil {
-			return "", err
-		}
-		if owned {
+		owned, occupied, destAbs, containErr, err := probeCandidate(ctx, d, q, vaultID, rel)
+		switch {
+		case err != nil:
+			return "", "", err
+		case owned:
 			continue
-		}
-
-		destAbs := filepath.Join(d.Config.VaultAbs, filepath.FromSlash(rel))
-		occupied, err := destinationOccupied(destAbs)
-		if err != nil {
-			return "", err
-		}
-		if occupied {
+		case occupied:
 			return reserveNumberedCandidate(ctx, d, q, vaultID, rel)
-		}
-		if _, err := materialize.WithinRoot(d.Config.VaultAbs, rel); err != nil {
-			containmentErr = err
+		case containErr != nil:
+			containmentErr = containErr
 			continue
 		}
-		return rel, nil
+		return rel, destAbs, nil
 	}
 	if containmentErr != nil {
-		return "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
+		return "", "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
 	}
-	return "", fmt.Errorf("no available destination filename for %s", canonical)
+	return "", "", fmt.Errorf("no available destination filename for %s", canonical)
 }
 
-func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (string, error) {
+func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (string, string, error) {
 	for n := 1; ; n++ {
-		candidate, err := numberedCandidate(rel, n)
+		candidate, err := layout.NumberedSibling(rel, n)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		owned, err := database.IsPathOwned(ctx, q, vaultID, candidate)
-		if err != nil {
-			return "", err
-		}
-		if owned {
+		owned, occupied, destAbs, containErr, err := probeCandidate(ctx, d, q, vaultID, candidate)
+		switch {
+		case err != nil:
+			return "", "", err
+		case owned, occupied:
 			continue
+		case containErr != nil:
+			return "", "", containErr
 		}
-		destAbs := filepath.Join(d.Config.VaultAbs, filepath.FromSlash(candidate))
-		occupied, err := destinationOccupied(destAbs)
-		if err != nil {
-			return "", err
-		}
-		if occupied {
-			continue
-		}
-		if _, err := materialize.WithinRoot(d.Config.VaultAbs, candidate); err != nil {
-			return "", err
-		}
-		return candidate, nil
+		return candidate, destAbs, nil
 	}
+}
+
+// probeCandidate classifies one destination candidate: owned by another
+// materialization, physically occupied, or unsafe (containErr). Occupancy is
+// probed on the lexical path without following symlinks so an unowned symlink
+// counts as occupied and is preserved rather than resolved; containment is
+// verified only for a candidate that would actually be written.
+func probeCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (owned, occupied bool, destAbs string, containErr, err error) {
+	owned, err = database.IsPathOwned(ctx, q, vaultID, rel)
+	if err != nil || owned {
+		return owned, false, "", nil, err
+	}
+	occupied, err = destinationOccupied(filepath.Join(d.Config.VaultAbs, filepath.FromSlash(rel)))
+	if err != nil || occupied {
+		return false, occupied, "", nil, err
+	}
+	destAbs, containErr = safepath.WithinRoot(d.Config.VaultAbs, rel)
+	if containErr != nil {
+		return false, false, "", containErr, nil
+	}
+	return false, false, destAbs, nil, nil
 }
 
 func destinationOccupied(destAbs string) (bool, error) {
@@ -415,36 +428,6 @@ func destinationOccupied(destAbs string) (bool, error) {
 	default:
 		return false, fmt.Errorf("inspect destination %s: %w", destAbs, err)
 	}
-}
-
-func numberedCandidate(rel string, n int) (string, error) {
-	if n < 1 {
-		return "", fmt.Errorf("invalid destination sequence %d", n)
-	}
-	name := path.Base(rel)
-	ext := path.Ext(name)
-	stem := strings.TrimSuffix(name, ext)
-	marker := fmt.Sprintf("-%d", n)
-	budget := maxVaultFilenameBytes - len(marker) - len(ext)
-	if budget < 1 {
-		return "", fmt.Errorf("no room for numbered destination based on %s", rel)
-	}
-	stem = strings.TrimRight(truncateUTF8Prefix(stem, budget), " .")
-	if stem == "" {
-		stem = "unnamed"
-	}
-	return path.Join(path.Dir(rel), stem+marker+ext), nil
-}
-
-func truncateUTF8Prefix(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	end := maxBytes
-	for end > 0 && !utf8.RuneStart(s[end]) {
-		end--
-	}
-	return s[:end]
 }
 
 // printResult renders one import result with the arrow aligned under the
@@ -483,7 +466,7 @@ func preserveVaultEdit(d *Deps, matRelPath string, content []byte, date string) 
 			base = fmt.Sprintf("%s--vault-edit--%d", stem, n)
 		}
 		rel := path.Join(conflictsRoot, date, base+suffix)
-		abs, err := materialize.WithinRoot(d.Config.VaultAbs, rel)
+		abs, err := safepath.WithinRoot(d.Config.VaultAbs, rel)
 		if err != nil {
 			return "", err
 		}

@@ -1,19 +1,17 @@
-package materialize
+package safepath
 
 import (
 	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
-
-	"md2obs/internal/safepath"
 )
 
-// WithinRoot joins a vault-relative path (forward slashes) to the absolute
+// WithinRoot joins a root-relative path (forward slashes) to the absolute
 // root and verifies the result stays strictly inside the physical root.
 // Traversal components are rejected before joining, then symlinks in the
 // nearest existing ancestors are resolved so a directory symlink cannot
-// redirect the write outside the vault.
+// redirect the destination outside the root.
 func WithinRoot(rootAbs, rel string) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("empty vault-relative path")
@@ -30,16 +28,16 @@ func WithinRoot(rootAbs, rel string) (string, error) {
 			return "", fmt.Errorf("vault-relative path %q contains a traversal component", rel)
 		}
 	}
-	root, err := safepath.ResolveExistingAncestor(rootAbs)
+	root, err := ResolveExistingAncestor(rootAbs)
 	if err != nil {
 		return "", fmt.Errorf("resolve vault root: %w", err)
 	}
 	joined := filepath.Join(root, filepath.FromSlash(cleaned))
-	resolved, err := safepath.ResolveExistingAncestor(joined)
+	resolved, err := ResolveExistingAncestor(joined)
 	if err != nil {
 		return "", fmt.Errorf("resolve destination %q: %w", rel, err)
 	}
-	inside, err := safepath.Within(root, resolved, false)
+	inside, err := Within(root, resolved, false)
 	if err != nil {
 		return "", err
 	}

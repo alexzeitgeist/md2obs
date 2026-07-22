@@ -261,19 +261,13 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 				daysSet = true
 			}
 		})
-		if *allSources && daysSet {
-			return options, fmt.Errorf("--all cannot be combined with --days")
-		}
 		policy, err := app.ParsePolicy(*policyFlag)
 		if err != nil {
 			return options, err
 		}
-		refreshDays := *days
-		if *allSources {
-			refreshDays = 0
-		}
 		options.refresh = app.RefreshOptions{
-			Days:          refreshDays,
+			Days:          *days,
+			DaysSet:       daysSet,
 			All:           *allSources,
 			OnVaultChange: policy,
 		}
@@ -334,13 +328,13 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		}
 		return options, nil
 
-	case "debug list":
-		fs := commandFlagSet("debug list")
+	case "debug list", "debug status":
+		fs := commandFlagSet(command)
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs debug list")
+			return options, fmt.Errorf("usage: md2obs %s", command)
 		}
 		return options, nil
 
@@ -353,16 +347,6 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			return options, fmt.Errorf("usage: md2obs debug history FILE")
 		}
 		options.historyFile = fs.Arg(0)
-		return options, nil
-
-	case "debug status":
-		fs := commandFlagSet("debug status")
-		if err := fs.Parse(args); err != nil {
-			return options, err
-		}
-		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs debug status")
-		}
 		return options, nil
 	}
 	return options, fmt.Errorf("unhandled command %q", command)

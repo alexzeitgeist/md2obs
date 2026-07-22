@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path"
 	"strings"
 	"unicode/utf8"
@@ -149,6 +150,26 @@ func truncateUTF8(s string, maxBytes int) string {
 		end--
 	}
 	return s[:end]
+}
+
+// NumberedSibling returns rel's n-th numbered sibling, e.g. "a/note.md" ->
+// "a/note-2.md", staying within the layout's filename byte budget. Callers use
+// it to preserve an existing vault file unknown to the database.
+func NumberedSibling(rel string, n int) (string, error) {
+	if n < 1 {
+		return "", fmt.Errorf("invalid destination sequence %d", n)
+	}
+	stem, suffix := splitName(path.Base(rel))
+	marker := fmt.Sprintf("-%d", n)
+	budget := maxFilenameBytes - len(marker) - len(suffix)
+	if budget < 1 {
+		return "", fmt.Errorf("no room for numbered destination based on %s", rel)
+	}
+	stem = strings.TrimRight(truncateUTF8(stem, budget), " .")
+	if stem == "" {
+		stem = "unnamed"
+	}
+	return path.Join(path.Dir(rel), stem+marker+suffix), nil
 }
 
 // shortHash is the deterministic collision fallback: the first 6 hex digits
