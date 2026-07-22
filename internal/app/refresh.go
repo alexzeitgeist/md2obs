@@ -13,7 +13,7 @@ type RefreshOptions struct {
 	// Days is the inclusive local calendar-day window. It is zero when All is
 	// selected.
 	Days int
-	// All selects every source ever materialized in the configured vault.
+	// All selects every source currently tracked in the configured vault.
 	All bool
 	// OnVaultChange decides what happens when a changed source would overwrite
 	// a vault copy edited since the last import.

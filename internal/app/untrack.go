@@ -14,9 +14,8 @@ import (
 	"md2obs/internal/watcher"
 )
 
-// UntrackOptions selects sources whose automatic watch/refresh eligibility
-// should be disabled in the configured vault. Journal history and vault files
-// are never removed.
+// UntrackOptions selects sources whose bookkeeping should be forgotten in the
+// configured vault. Physical vault files are never removed.
 type UntrackOptions struct {
 	Files         []string
 	Missing       bool
@@ -43,8 +42,9 @@ type untrackSelection struct {
 	entry database.TrackingEntry
 }
 
-// RunUntrack explicitly disables automatic watch and refresh for selected
-// sources in the configured vault. A later explicit import reactivates them.
+// RunUntrack forgets selected sources in the configured vault. It removes the
+// vault's materialization records and garbage-collects bookkeeping no other
+// vault references. A later explicit import registers the source again.
 func RunUntrack(ctx context.Context, d *Deps, opts UntrackOptions) error {
 	if err := opts.Validate(); err != nil {
 		return err
@@ -76,8 +76,7 @@ func runNamedUntrack(ctx context.Context, d *Deps, opts UntrackOptions, vaultID 
 			continue
 		}
 		if len(entries) == 0 || vaultID == 0 {
-			fmt.Fprintf(d.Err, "error: untrack %s: not tracked in configured vault\n", file)
-			failed++
+			fmt.Fprintf(d.Out, "not tracked: %s\n", file)
 			continue
 		}
 		if len(entries) > 1 {
@@ -95,10 +94,6 @@ func runNamedUntrack(ctx context.Context, d *Deps, opts UntrackOptions, vaultID 
 			continue
 		}
 		seen[entry.ID] = struct{}{}
-		if !entry.Active {
-			fmt.Fprintf(d.Out, "already untracked: %s\n", entry.DisplayPath)
-			continue
-		}
 		selected = append(selected, untrackSelection{entry: entry})
 	}
 	changed, err := applyUntrack(ctx, d, vaultID, selected, opts.DryRun)
@@ -153,9 +148,6 @@ func runBatchUntrack(ctx context.Context, d *Deps, opts UntrackOptions, vaultID 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !entry.Active {
-			continue
-		}
 		checked++
 		if cutoff != "" && entry.SnapshotDate >= cutoff {
 			continue
@@ -204,17 +196,43 @@ func runBatchUntrack(ctx context.Context, d *Deps, opts UntrackOptions, vaultID 
 	}
 	printBatchUntrackSummary(d.Out, opts.DryRun, checked, changed, unavailable, failed)
 	if failed > 0 {
-		return fmt.Errorf("%d of %d active sources could not be checked for untracking", failed, checked)
+		return fmt.Errorf("%d of %d tracked sources could not be checked for untracking", failed, checked)
 	}
 	return nil
 }
 
 func applyUntrack(ctx context.Context, d *Deps, vaultID int64, selected []untrackSelection, dryRun bool) (int, error) {
 	if dryRun {
+		changed := 0
 		for _, selection := range selected {
-			fmt.Fprintf(d.Out, "would untrack: %s\n", selection.entry.DisplayPath)
+			result, err := database.PreviewForgetSourceInVault(
+				ctx,
+				d.DB.Query(),
+				selection.entry.ID,
+				selection.entry.CanonicalPath,
+				vaultID,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("preview untrack %s: %w", selection.entry.DisplayPath, err)
+			}
+			if !result.Changed() {
+				continue
+			}
+			changed++
+			fmt.Fprintf(
+				d.Out,
+				"would untrack: %s (forget %d materialization%s, collect %d snapshot%s, %d revision%s, source %s)\n",
+				selection.entry.DisplayPath,
+				result.MaterializationsDeleted,
+				pluralSuffix(result.MaterializationsDeleted),
+				result.SnapshotsDeleted,
+				pluralSuffix(result.SnapshotsDeleted),
+				result.RevisionsDeleted,
+				pluralSuffix(result.RevisionsDeleted),
+				collectedOrRetained(result.SourceDeleted),
+			)
 		}
-		return len(selected), nil
+		return changed, nil
 	}
 	if len(selected) == 0 {
 		return 0, nil
@@ -225,19 +243,43 @@ func applyUntrack(ctx context.Context, d *Deps, vaultID int64, selected []untrac
 		return 0, fmt.Errorf("untrack: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	nowUTC := utc(d.Now())
+	changed := make([]untrackSelection, 0, len(selected))
 	for _, selection := range selected {
-		if err := database.SetWatchActive(ctx, tx, selection.entry.ID, vaultID, false, nowUTC); err != nil {
+		result, err := database.ForgetSourceInVault(
+			ctx,
+			tx,
+			selection.entry.ID,
+			selection.entry.CanonicalPath,
+			vaultID,
+		)
+		if err != nil {
 			return 0, fmt.Errorf("untrack %s: %w", selection.entry.DisplayPath, err)
+		}
+		if result.Changed() {
+			changed = append(changed, selection)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("untrack: commit: %w", err)
 	}
-	for _, selection := range selected {
+	for _, selection := range changed {
 		fmt.Fprintf(d.Out, "untracked: %s\n", selection.entry.DisplayPath)
 	}
-	return len(selected), nil
+	return len(changed), nil
+}
+
+func collectedOrRetained(collected bool) string {
+	if collected {
+		return "collected"
+	}
+	return "retained"
+}
+
+func pluralSuffix(count int64) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func notifyUntrack(d *Deps) {
@@ -255,7 +297,7 @@ func printBatchUntrackSummary(out io.Writer, dryRun bool, checked, changed, unav
 	if checked == 1 {
 		sourceWord = "source"
 	}
-	fmt.Fprintf(out, "Checked %d active %s: %d %s, %d unavailable, %d failed\n", checked, sourceWord, changed, verb, unavailable, failed)
+	fmt.Fprintf(out, "Checked %d tracked %s: %d %s, %d unavailable, %d failed\n", checked, sourceWord, changed, verb, unavailable, failed)
 }
 
 // sourceMissingWithAccessibleParent reports a definite exact-path absence only

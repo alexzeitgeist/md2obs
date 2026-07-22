@@ -780,7 +780,7 @@ func TestQueryCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := env.out.String()
-	for _, want := range []string{src, "tracking:      active", "last snapshot: 2026-07-20", "Source: ", "Schema version:    3", "Sources:           1"} {
+	for _, want := range []string{src, "last snapshot: 2026-07-20", "Source: ", "Schema version:    4", "Sources:           1"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output does not contain %q:\n%s", want, output)
 		}

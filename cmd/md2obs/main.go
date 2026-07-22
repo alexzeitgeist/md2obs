@@ -41,7 +41,7 @@ Commands:
            omitted. Explicit imports always overwrite.
   refresh  Check previously imported sources for changes and catch up the
            changed ones. --days selects recent materializations (default 1);
-           --all selects every source ever materialized in this vault.
+           --all selects every source currently tracked in this vault.
            Vault edits are skipped by default.
   watch    Watch sources materialized in this vault today (--days N widens
            the initial window) and enroll later imports while running.
@@ -49,11 +49,11 @@ Commands:
            --debounce sets the per-source quiet period (default 500ms).
            --on-vault-change sets the policy when the vault copy was edited
            since the last import: skip (default), overwrite, or preserve.
-  untrack  Stop automatically watching and refreshing named sources, or select
-           a batch by definite absence and/or materialization age. Existing
-           snapshots and vault files are preserved; import reactivates.
-  list     List known sources and their most recent snapshot.
-  history  Show dated snapshots for one source.
+  untrack  Forget named sources in this vault, or select a batch by definite
+           absence and/or materialization age. Database bookkeeping no other
+           vault needs is collected; physical vault files are untouched.
+  list     List sources currently tracked in this vault.
+  history  Show retained snapshot diagnostics for one source.
   status   Show configuration, database location, schema version, and counts.
 
 Configuration:
@@ -78,7 +78,7 @@ ones whose current content differs from their selected snapshot.
 
 Options:
   --days N                    Materialization date window (default 1)
-  --all                       Every source ever materialized in this vault
+  --all                       Every source currently tracked in this vault
   --on-vault-change POLICY    skip (default), overwrite, or preserve
 `,
 	"watch": `Usage:
@@ -98,9 +98,9 @@ Options:
   md2obs untrack --missing [--older-than AGE] [--dry-run]
   md2obs untrack --older-than AGE [--dry-run]
 
-Stop automatically watching and refreshing selected sources in the configured
-vault. Existing snapshots and vault files are preserved. An explicit import
-reactivates a source.
+Forget selected sources in the configured vault. Materialization records for
+this vault and bookkeeping no other vault references are removed. Physical
+vault files are untouched. A later explicit import registers the source again.
 
 Batch selectors are combined: --missing --older-than 30d selects sources that
 are both definitely absent and older than 30 local calendar days.
@@ -109,15 +109,16 @@ Options:
   --missing           Exact source absent while its parent is accessible
   --older-than AGE    Newest materialized snapshot is older than AGE (for
                       example 30d or 365d)
-  --dry-run           Report what would be untracked without changing state
+  --dry-run           Report bookkeeping that would be forgotten or collected
 `,
 	"list": `Usage: md2obs list
 
-List known sources and their most recent snapshots.
+List sources currently tracked in the configured vault.
 `,
 	"history": `Usage: md2obs history FILE
 
-Show dated snapshots for one explicitly imported source.
+Show retained snapshot diagnostics for one explicitly imported source. Entries
+are complete while the source remains tracked but may be collected by untrack.
 `,
 	"status": `Usage: md2obs status
 
@@ -229,7 +230,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 	case "refresh":
 		fs := commandFlagSet("refresh")
 		days := fs.Int("days", 1, "materialization date window (1 = today)")
-		allSources := fs.Bool("all", false, "every source ever materialized in this vault")
+		allSources := fs.Bool("all", false, "every source currently tracked in this vault")
 		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "policy when the vault copy was edited: overwrite, skip, or preserve")
 		if err := fs.Parse(args); err != nil {
 			return options, err
@@ -293,7 +294,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		fs := commandFlagSet("untrack")
 		missing := fs.Bool("missing", false, "sources whose exact path is absent while its parent is accessible")
 		olderThan := fs.String("older-than", "", "sources whose newest materialized snapshot is older than AGE")
-		dryRun := fs.Bool("dry-run", false, "report without changing tracking state")
+		dryRun := fs.Bool("dry-run", false, "report without changing bookkeeping")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}

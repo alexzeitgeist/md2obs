@@ -13,7 +13,7 @@ import (
 	"md2obs/internal/watcher"
 )
 
-func TestRunUntrackNamedPreservesHistoryAndImportReactivates(t *testing.T) {
+func TestRunUntrackNamedForgetsBookkeepingAndReimportRegistersFresh(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	src := writeSource(t, t.TempDir(), "named.md", "# one\n")
@@ -22,6 +22,9 @@ func TestRunUntrackNamedPreservesHistoryAndImportReactivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	vaultPath := filepath.Join(env.vault, filepath.FromSlash(result.RelPath))
+	if err := os.WriteFile(vaultPath, []byte("# manual vault edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Files: []string{src}}); err != nil {
 		t.Fatalf("RunUntrack: %v", err)
@@ -29,14 +32,14 @@ func TestRunUntrackNamedPreservesHistoryAndImportReactivates(t *testing.T) {
 	if !strings.Contains(env.out.String(), "untracked: "+src) {
 		t.Fatalf("untrack result missing:\n%s", env.out.String())
 	}
-	if data, err := os.ReadFile(vaultPath); err != nil || string(data) != "# one\n" {
-		t.Fatalf("vault history changed: %q, err %v", data, err)
+	if data, err := os.ReadFile(vaultPath); err != nil || string(data) != "# manual vault edit\n" {
+		t.Fatalf("vault file changed: %q, err %v", data, err)
 	}
-	if _, snapshots, materializations, err := env.deps.DB.Counts(ctx); err != nil || snapshots != 1 || materializations != 1 {
-		t.Fatalf("history counts = %d snapshots/%d materializations, err %v", snapshots, materializations, err)
+	if sources, snapshots, materializations, err := env.deps.DB.Counts(ctx); err != nil || sources != 0 || snapshots != 0 || materializations != 0 {
+		t.Fatalf("bookkeeping counts = %d sources/%d snapshots/%d materializations, err %v", sources, snapshots, materializations, err)
 	}
-	if got := activeTracking(t, env, src); got {
-		t.Fatal("named source remained active")
+	if got := trackedInVault(t, env, src); got {
+		t.Fatal("named source remained tracked")
 	}
 	if err := os.WriteFile(src, []byte("# two\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -44,21 +47,31 @@ func TestRunUntrackNamedPreservesHistoryAndImportReactivates(t *testing.T) {
 	if err := RunRefresh(ctx, env.deps, RefreshOptions{All: true, OnVaultChange: PolicySkip}); err != nil {
 		t.Fatal(err)
 	}
-	if got := env.vaultFile(t, result.RelPath); got != "# one\n" {
+	if got := env.vaultFile(t, result.RelPath); got != "# manual vault edit\n" {
 		t.Fatalf("refresh handled explicitly untracked source: %q", got)
 	}
 	if err := RunList(ctx, env.deps); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(env.out.String(), "tracking:      inactive") {
-		t.Fatalf("list did not expose inactive tracking:\n%s", env.out.String())
+	if !strings.Contains(env.out.String(), "No sources tracked in configured vault") {
+		t.Fatalf("list retained forgotten source:\n%s", env.out.String())
 	}
 
-	if _, err := ImportFile(ctx, env.deps, src, PolicyOverwrite); err != nil {
+	second, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := activeTracking(t, env, src); !got {
-		t.Fatal("explicit import did not reactivate source")
+	if second.RelPath == result.RelPath {
+		t.Fatalf("same-day reimport reclaimed handed-off path %s", result.RelPath)
+	}
+	if data, err := os.ReadFile(vaultPath); err != nil || string(data) != "# manual vault edit\n" {
+		t.Fatalf("same-day reimport changed handed-off file: %q, err %v", data, err)
+	}
+	if got := env.vaultFile(t, second.RelPath); got != "# two\n" {
+		t.Fatalf("fresh registration content = %q", got)
+	}
+	if got := trackedInVault(t, env, src); !got {
+		t.Fatal("explicit import did not register source again")
 	}
 }
 
@@ -82,7 +95,7 @@ func TestRunUntrackNamedAcceptsMissingDisplayPath(t *testing.T) {
 		t.Fatalf("untrack missing display path: %v", err)
 	}
 	entries, err := database.FindTrackingEntriesByPath(ctx, env.deps.DB.Query(), env.vault, target, display)
-	if err != nil || len(entries) != 1 || entries[0].Active {
+	if err != nil || len(entries) != 0 {
 		t.Fatalf("tracking entries = %+v, err %v", entries, err)
 	}
 }
@@ -109,7 +122,7 @@ func TestWatchedImportCannotReactivateExplicitlyUntrackedSource(t *testing.T) {
 	if _, err := ImportWatchedSource(ctx, env.deps, *registered, PolicySkip); !errors.Is(err, errSourceUntracked) {
 		t.Fatalf("watched import error = %v, want explicit-untrack guard", err)
 	}
-	if activeTracking(t, env, src) {
+	if trackedInVault(t, env, src) {
 		t.Fatal("stale watched import reactivated source")
 	}
 	if got := env.vaultFile(t, result.RelPath); got != "# one\n" {
@@ -143,23 +156,90 @@ func TestRunUntrackMissingIsConservativeAndSupportsDryRun(t *testing.T) {
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Missing: true, DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(env.out.String(), "would untrack: "+missing) || !strings.Contains(env.out.String(), "unavailable, still tracked: "+unavailable) {
+	if !strings.Contains(env.out.String(), "would untrack: "+missing+" (forget 1 materialization, collect 1 snapshot, 1 revision, source collected)") || !strings.Contains(env.out.String(), "unavailable, still tracked: "+unavailable) {
 		t.Fatalf("dry-run diagnostics missing:\n%s", env.out.String())
 	}
 	for _, path := range []string{present, missing, unavailable} {
-		if !activeTracking(t, env, path) {
-			t.Fatalf("dry-run deactivated %s", path)
+		if !trackedInVault(t, env, path) {
+			t.Fatalf("dry-run untracked %s", path)
 		}
 	}
 
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Missing: true}); err != nil {
 		t.Fatal(err)
 	}
-	if activeTracking(t, env, missing) {
-		t.Fatal("definitely missing source remained active")
+	if trackedInVault(t, env, missing) {
+		t.Fatal("definitely missing source remained tracked")
 	}
-	if !activeTracking(t, env, present) || !activeTracking(t, env, unavailable) {
+	if !trackedInVault(t, env, present) || !trackedInVault(t, env, unavailable) {
 		t.Fatal("batch missing untracked a present or unavailable source")
+	}
+}
+
+func TestRunUntrackDryRunDoesNotTakeWriteLock(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "dry-lock.md", "# one\n")
+	if _, err := ImportFile(ctx, env.deps, src, PolicyOverwrite); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := database.Open(ctx, env.deps.DB.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	tx, err := other.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'schema_version'`); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunUntrack(ctx, env.deps, UntrackOptions{Files: []string{src}, DryRun: true})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dry-run while writer held lock: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dry-run blocked behind an immediate write transaction")
+	}
+	if !trackedInVault(t, env, src) {
+		t.Fatal("dry-run changed tracking")
+	}
+}
+
+func TestRunUntrackLaterDayReimportCopiesForgottenContentAgain(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "later.md", "# same\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunUntrack(ctx, env.deps, UntrackOptions{Files: []string{src}}); err != nil {
+		t.Fatal(err)
+	}
+
+	env.setNow(time.Date(2026, 7, 21, 10, 0, 0, 0, time.Local))
+	second, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.RelPath == second.RelPath || !strings.Contains(second.RelPath, "/2026-07-21/") {
+		t.Fatalf("later-day reimport paths = %q then %q", first.RelPath, second.RelPath)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# same\n" {
+		t.Fatalf("handed-off first copy = %q", got)
+	}
+	if got := env.vaultFile(t, second.RelPath); got != "# same\n" {
+		t.Fatalf("later-day copy = %q", got)
 	}
 }
 
@@ -192,20 +272,20 @@ func TestRunUntrackBatchFiltersIntersect(t *testing.T) {
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Missing: true, OlderThanDays: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if activeTracking(t, env, oldMissing) {
+	if trackedInVault(t, env, oldMissing) {
 		t.Fatal("old missing source did not satisfy combined filters")
 	}
-	if !activeTracking(t, env, oldPresent) || !activeTracking(t, env, recentMissing) {
+	if !trackedInVault(t, env, oldPresent) || !trackedInVault(t, env, recentMissing) {
 		t.Fatal("combined filters did not use intersection semantics")
 	}
 
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{OlderThanDays: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if activeTracking(t, env, oldPresent) {
+	if trackedInVault(t, env, oldPresent) {
 		t.Fatal("age-only batch did not untrack old present source")
 	}
-	if !activeTracking(t, env, recentMissing) {
+	if !trackedInVault(t, env, recentMissing) {
 		t.Fatal("age-only batch untracked recent source")
 	}
 }
@@ -233,8 +313,8 @@ func TestRunUntrackMissingReportsIdentityChangeWithoutUntracking(t *testing.T) {
 	if !strings.Contains(env.out.String(), "source identity changed") {
 		t.Fatalf("identity change was not reported:\n%s", env.out.String())
 	}
-	if !activeTracking(t, env, src) {
-		t.Fatal("identity change deactivated source")
+	if !trackedInVault(t, env, src) {
+		t.Fatal("identity change untracked source")
 	}
 }
 
@@ -297,7 +377,7 @@ func TestRunUntrackNotificationFailureDoesNotUndoState(t *testing.T) {
 	if err := RunUntrack(ctx, env.deps, UntrackOptions{Files: []string{src}}); err != nil {
 		t.Fatalf("notification failure changed untrack result: %v", err)
 	}
-	if activeTracking(t, env, src) {
+	if trackedInVault(t, env, src) {
 		t.Fatal("notification failure rolled back untracking")
 	}
 	if !strings.Contains(env.out.String(), "warning: sources were untracked, but running watchers may need to be restarted") {
@@ -305,13 +385,13 @@ func TestRunUntrackNotificationFailureDoesNotUndoState(t *testing.T) {
 	}
 }
 
-func activeTracking(t *testing.T, env *testEnv, canonicalPath string) bool {
+func trackedInVault(t *testing.T, env *testEnv, canonicalPath string) bool {
 	t.Helper()
 	entries, err := database.FindTrackingEntriesByPath(
 		context.Background(), env.deps.DB.Query(), env.vault, canonicalPath, canonicalPath,
 	)
-	if err != nil || len(entries) != 1 {
+	if err != nil {
 		t.Fatalf("tracking entry for %s = %+v, err %v", canonicalPath, entries, err)
 	}
-	return entries[0].Active
+	return len(entries) > 0
 }

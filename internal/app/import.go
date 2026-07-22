@@ -98,7 +98,7 @@ func ImportFile(ctx context.Context, d *Deps, file string, policy Policy) (Resul
 // ImportWatchedSource imports a source selected from SQLite at watcher
 // startup. Re-resolving the event path must produce the same canonical
 // identity; the watcher is never allowed to register a different source or
-// reactivate one that an explicit untrack disabled concurrently.
+// recreate bookkeeping that an explicit untrack removed concurrently.
 func ImportWatchedSource(ctx context.Context, d *Deps, registered database.Source, policy Policy) (Result, error) {
 	return importFile(ctx, d, registered.CanonicalPath, policy, &registered)
 }
@@ -141,6 +141,24 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	}
 	defer tx.Rollback()
 
+	var vaultID int64
+	if registered != nil {
+		vaultID, err = database.GetVaultIDByKey(ctx, tx, vaultRoot)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		if vaultID == 0 {
+			return Result{}, errSourceUntracked
+		}
+		tracked, err := database.IsSourceTrackedInVault(ctx, tx, registered.ID, vaultID)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		if !tracked {
+			return Result{}, errSourceUntracked
+		}
+	}
+
 	var srcID int64
 	if registered == nil {
 		srcID, err = database.UpsertSource(ctx, tx, canonical, display, nowUTC)
@@ -157,21 +175,10 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	if err != nil {
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
-	vaultID, err := database.EnsureVault(ctx, tx, vaultRoot, filepath.Base(vaultRoot), vaultRoot, nowUTC)
-	if err != nil {
-		return Result{}, fmt.Errorf("import %s: %w", display, err)
-	}
 	if registered == nil {
-		if err := database.SetWatchActive(ctx, tx, srcID, vaultID, true, nowUTC); err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-	} else {
-		active, err := database.IsWatchActive(ctx, tx, srcID, vaultID)
+		vaultID, err = database.EnsureVault(ctx, tx, vaultRoot, filepath.Base(vaultRoot), vaultRoot, nowUTC)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-		if !active {
-			return Result{}, errSourceUntracked
 		}
 	}
 	layoutJSON, _ := json.Marshal(map[string]string{"root_directory": d.Config.RootDirectory})

@@ -19,7 +19,6 @@ type Source struct {
 type TrackingEntry struct {
 	Source
 	SnapshotDate string
-	Active       bool
 }
 
 // UpsertSource registers a source or refreshes its display path and
@@ -75,51 +74,60 @@ func GetSourceByPath(ctx context.Context, q Querier, canonicalPath string) (*Sou
 	return &s, nil
 }
 
+// FindSourcesByPath returns sources whose canonical identity or last display
+// path matches path. Multiple sources can share a reused symlink display path.
+func FindSourcesByPath(ctx context.Context, q Querier, path string) ([]Source, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT source_id, canonical_path, display_path
+		FROM sources
+		WHERE canonical_path = ? OR display_path = ?
+		ORDER BY canonical_path`, path, path)
+	if err != nil {
+		return nil, fmt.Errorf("find sources by path %s: %w", path, err)
+	}
+	defer rows.Close()
+
+	var sources []Source
+	for rows.Next() {
+		var source Source
+		if err := rows.Scan(&source.ID, &source.CanonicalPath, &source.DisplayPath); err != nil {
+			return nil, fmt.Errorf("scan source by path %s: %w", path, err)
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
 // ListEntry is one row of `md2obs list`: a source with its latest snapshot.
 type ListEntry struct {
 	DisplayPath  string
 	SnapshotDate string
-	RelativePath sql.NullString
-	// TrackingActive is null when this source has never been materialized in
-	// the configured vault. A missing watch_tracking row means active for
-	// sources imported before explicit tracking state was introduced.
-	TrackingActive sql.NullBool
+	RelativePath string
 	// Current compares database intent with the last recorded write; it does
 	// not describe a live filesystem check.
 	Current bool
 }
 
-// ListSources returns every source with its most recent snapshot and, when
-// one exists in the given vault, that snapshot's materialization.
+// ListSources returns each source currently tracked in the given vault with
+// its newest materialized snapshot there.
 func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 		    s.display_path,
 		    sn.snapshot_date,
 		    m.relative_path,
-		    CASE WHEN EXISTS (
-		        SELECT 1
-		        FROM snapshots AS tracked_sn
-		        JOIN materializations AS tracked_m
-		            ON tracked_m.snapshot_id = tracked_sn.snapshot_id
-		        WHERE tracked_sn.source_id = s.source_id
-		          AND tracked_m.vault_id = ?
-		    ) THEN COALESCE((
-		        SELECT wt.active
-		        FROM watch_tracking AS wt
-		        WHERE wt.source_id = s.source_id AND wt.vault_id = ?
-		    ), 1) END,
-		    COALESCE(m.written_revision_id = sn.revision_id, 0)
-		FROM sources AS s
-		JOIN snapshots AS sn
-		    ON sn.snapshot_id = (
-		        SELECT snapshot_id FROM snapshots
-		        WHERE source_id = s.source_id
-		        ORDER BY snapshot_date DESC
-		        LIMIT 1)
-		LEFT JOIN materializations AS m
-		    ON m.snapshot_id = sn.snapshot_id AND m.vault_id = ?
-		ORDER BY s.display_path`, vaultID, vaultID, vaultID)
+		    m.written_revision_id = sn.revision_id
+		FROM materializations AS m
+		JOIN snapshots AS sn ON sn.snapshot_id = m.snapshot_id
+		JOIN sources AS s ON s.source_id = sn.source_id
+		WHERE m.vault_id = ?
+		  AND sn.snapshot_date = (
+		      SELECT MAX(sn2.snapshot_date)
+		      FROM snapshots AS sn2
+		      JOIN materializations AS m2 ON m2.snapshot_id = sn2.snapshot_id
+		      WHERE sn2.source_id = s.source_id
+		        AND m2.vault_id = m.vault_id)
+		ORDER BY s.display_path`, vaultID)
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
@@ -128,7 +136,7 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 	var entries []ListEntry
 	for rows.Next() {
 		var e ListEntry
-		if err := rows.Scan(&e.DisplayPath, &e.SnapshotDate, &e.RelativePath, &e.TrackingActive, &e.Current); err != nil {
+		if err := rows.Scan(&e.DisplayPath, &e.SnapshotDate, &e.RelativePath, &e.Current); err != nil {
 			return nil, fmt.Errorf("scan list row: %w", err)
 		}
 		entries = append(entries, e)
@@ -144,37 +152,26 @@ type WatchCandidate struct {
 	ContentSHA   string
 }
 
-// SetWatchActive records whether a source remains eligible for automatic
-// watching and refresh in a vault. Explicit imports reactivate a source;
-// explicit untracking deactivates it without deleting any journal history.
-func SetWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64, active bool, nowUTC string) error {
-	value := 0
-	if active {
-		value = 1
-	}
-	_, err := q.ExecContext(ctx, `INSERT INTO watch_tracking (source_id, vault_id, active, updated_at_utc)
-		VALUES (?, ?, ?, ?) ON CONFLICT (source_id, vault_id) DO UPDATE SET active = excluded.active, updated_at_utc = excluded.updated_at_utc`, sourceID, vaultID, value, nowUTC)
+// IsSourceTrackedInVault reports whether any materialization still associates
+// a source with a vault. This predicate is also the watched-import race gate:
+// untrack deletes every matching materialization in the same transaction that
+// garbage-collects now-unreachable bookkeeping.
+func IsSourceTrackedInVault(ctx context.Context, q Querier, sourceID, vaultID int64) (bool, error) {
+	var tracked bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM snapshots AS sn
+		JOIN materializations AS m ON m.snapshot_id = sn.snapshot_id
+		WHERE sn.source_id = ? AND m.vault_id = ?
+	)`, sourceID, vaultID).Scan(&tracked)
 	if err != nil {
-		return fmt.Errorf("set watch tracking for source %d: %w", sourceID, err)
+		return false, fmt.Errorf("check vault tracking for source %d: %w", sourceID, err)
 	}
-	return nil
+	return tracked, nil
 }
 
-// IsWatchActive reports the vault-scoped automatic-tracking state. Sources
-// without an explicit row predate watch_tracking and remain active by default.
-func IsWatchActive(ctx context.Context, q Querier, sourceID, vaultID int64) (bool, error) {
-	var active bool
-	err := q.QueryRowContext(ctx, `SELECT COALESCE((
-		SELECT active FROM watch_tracking WHERE source_id = ? AND vault_id = ?
-	), 1)`, sourceID, vaultID).Scan(&active)
-	if err != nil {
-		return false, fmt.Errorf("get watch tracking for source %d: %w", sourceID, err)
-	}
-	return active, nil
-}
-
-// ListTrackingEntries returns every source ever materialized in vaultKey with
-// its current automatic-tracking state and newest materialized snapshot date.
+// ListTrackingEntries returns every source currently materialized in vaultKey
+// with its newest materialized snapshot date.
 func ListTrackingEntries(ctx context.Context, q Querier, vaultKey string) ([]TrackingEntry, error) {
 	return selectTrackingEntries(ctx, q, vaultKey, "", "")
 }
@@ -199,16 +196,13 @@ func selectTrackingEntries(ctx context.Context, q Querier, vaultKey, canonicalPa
 		    s.source_id,
 		    s.canonical_path,
 		    s.display_path,
-		    MAX(sn.snapshot_date),
-		    COALESCE(wt.active, 1)
+		    MAX(sn.snapshot_date)
 		FROM sources AS s
 		JOIN snapshots AS sn ON sn.source_id = s.source_id
 		JOIN materializations AS m ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v ON v.vault_id = m.vault_id
-		LEFT JOIN watch_tracking AS wt
-		    ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
 		WHERE v.vault_key = ?`+pathFilter+`
-		GROUP BY s.source_id, s.canonical_path, s.display_path, wt.active
+		GROUP BY s.source_id, s.canonical_path, s.display_path
 		ORDER BY s.canonical_path`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select tracking entries for vault %s: %w", vaultKey, err)
@@ -223,7 +217,6 @@ func selectTrackingEntries(ctx context.Context, q Querier, vaultKey, canonicalPa
 			&entry.CanonicalPath,
 			&entry.DisplayPath,
 			&entry.SnapshotDate,
-			&entry.Active,
 		); err != nil {
 			return nil, fmt.Errorf("scan tracking entry: %w", err)
 		}
@@ -252,9 +245,7 @@ func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 		    ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v
 		    ON v.vault_id = m.vault_id
-		LEFT JOIN watch_tracking AS wt ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
 		WHERE v.vault_key = ?
-		  AND COALESCE(wt.active, 1) = 1
 		  AND sn.snapshot_date >= ?
 		  AND sn.snapshot_date <= ?
 		  AND sn.snapshot_date = (
@@ -289,7 +280,7 @@ func SelectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 	return candidates, rows.Err()
 }
 
-// SelectAllWatchCandidates returns every source ever materialized in vaultKey,
+// SelectAllWatchCandidates returns every source currently tracked in vaultKey,
 // together with its newest materialized snapshot in that vault.
 func SelectAllWatchCandidates(ctx context.Context, q Querier, vaultKey string) ([]WatchCandidate, error) {
 	rows, err := q.QueryContext(ctx, `
@@ -308,9 +299,7 @@ func SelectAllWatchCandidates(ctx context.Context, q Querier, vaultKey string) (
 		    ON m.snapshot_id = sn.snapshot_id
 		JOIN vaults AS v
 		    ON v.vault_id = m.vault_id
-		LEFT JOIN watch_tracking AS wt ON wt.source_id = s.source_id AND wt.vault_id = v.vault_id
 		WHERE v.vault_key = ?
-		  AND COALESCE(wt.active, 1) = 1
 		  AND sn.snapshot_date = (
 		      SELECT MAX(sn2.snapshot_date)
 		      FROM snapshots AS sn2

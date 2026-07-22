@@ -43,10 +43,12 @@ Environment overrides for scripting:
 | `MD2OBS_VAULT` | `vault_path` |
 | `MD2OBS_STATE_DB` | state database location |
 
-State lives in SQLite at `~/.local/share/md2obs/state.db` (Linux),
+Internal bookkeeping lives in SQLite at `~/.local/share/md2obs/state.db` (Linux),
 `~/Library/Application Support/md2obs/state.db` (macOS). It is deliberately
 kept outside the vault so Obsidian Sync never sees live WAL files. The
-database must not be placed inside the vault.
+database must not be placed inside the vault. It is an operational registry,
+not a user-facing archive: `untrack` may garbage-collect rows no configured
+vault still references.
 
 ## Commands
 
@@ -93,7 +95,7 @@ names are truncated on a UTF-8 boundary and retain the source hash.
 ```console
 md2obs refresh                         # sources materialized today
 md2obs refresh --days 3                # today and the previous two days
-md2obs refresh --all                   # every source ever materialized here
+md2obs refresh --all                   # every source currently tracked here
 md2obs refresh --all --on-vault-change=preserve
 ```
 
@@ -202,48 +204,63 @@ md2obs untrack --missing --older-than 30d
 md2obs untrack --missing --dry-run
 ```
 
-`untrack` explicitly stops automatic watch and refresh for sources in the
-configured vault. It changes only vault-scoped tracking state: source history,
-dated snapshots, and existing vault files are preserved. Importing the source
-again reactivates it in that vault.
+`untrack` stops automatic watch and refresh by forgetting the selected source's
+materialization records in the configured vault. In the same transaction it
+garbage-collects snapshot, revision, and source rows that no other vault still
+references. Physical vault files are never inspected, moved, or deleted; after
+their bookkeeping is forgotten they are ordinary unowned vault files.
+
+Importing the source again registers it as fresh bookkeeping. On a same-day
+re-import, a handed-off file still occupying the preferred path is preserved
+and the new copy receives a numbered sibling such as `README-1.md`. On a later
+day, the date supplies a different preferred path; because the earlier
+revision bookkeeping was forgotten, the same content can be copied into that
+new dated folder again.
 
 Named paths may be untracked whether they still exist or not. A path shown by
 `md2obs list` can be passed back to `untrack`, including a missing source that
 was originally imported through a symlink. Named and batch selection cannot be
-combined in one invocation.
+combined in one invocation. Named untrack is idempotent: a path that is not
+associated with the configured vault is reported as `not tracked` and the
+command still succeeds.
 
 `--missing` selects an exact source only when that path is absent and its
 immediate parent can be read. If the parent is missing or inaccessible, the
 source is reported as unavailable and remains tracked; this avoids interpreting
 an unmounted volume or permissions problem as deletion. `--dry-run` reports the
-same decisions without changing tracking state.
+same decisions and collection counts without changing bookkeeping.
 
 `--older-than AGE` selects sources whose newest materialized snapshot in this
 vault is older than the given number of local calendar days. Ages use whole-day
 syntax such as `30d` or `365d`; source and vault filesystem modification times
 are not consulted. When `--missing` and `--older-than` are combined, both
-conditions must match. Untracking by age is operational pruning, not history or
-database cleanup.
+conditions must match. Only SQLite bookkeeping is forgotten; matching vault
+files remain untouched.
 
 An untrack operation notifies a running foreground watcher, which removes the
 source from its live membership. If notification fails, the database change is
-kept and a warning asks for a watcher restart.
+kept and a warning asks for a watcher restart. Every watched import also checks
+inside its write transaction that a materialization still associates the source
+with this vault, so a queued callback cannot recreate bookkeeping after
+untrack.
 
-When upgrading a schema-v2 database, md2obs reactivates inactive tracking rows
-once because that version could create them only from automatic live-deletion
-inference. In schema v3 and later, inactive rows represent explicit `untrack`
-operations and persist across restarts.
+Schema v4 removes the former inactive-tracking table. On first open it converts
+each schema-v3 inactive `(source, vault)` pair to the new forget semantics and
+garbage-collects newly unreferenced bookkeeping. Vault files remain untouched.
+Copy `state.db` before upgrading if you need the old internal rows for
+diagnostics.
 
 ### list / history / status
 
-`list` shows each source with its vault-scoped tracking state and latest
-snapshot. `tracking: inactive` means automatic watch and refresh were explicitly
-disabled; it does not mean history was deleted. `content: stale` means that the
-snapshot references a different revision from the last revision md2obs recorded
-writing at that path, for example after a skipped conflict. It is a database-state
-label, not the result of inspecting the current vault file. `history FILE` shows
-all dated snapshots for one source. `status` shows configuration, database
-location, schema version, and counts. All three are database queries only.
+`list` shows sources currently tracked in the configured vault and their latest
+materialization there. `content: stale` means that the retained snapshot
+references a different revision from the last revision md2obs recorded writing
+at that path, for example after a skipped conflict. It is a database-state label,
+not the result of inspecting the current vault file. `history FILE` is a
+diagnostic view of retained dated snapshots; it is complete while a source
+remains tracked, but untrack may collect entries no other vault references.
+`status` shows configuration, database location, schema version, and working-set
+counts. All three are database queries only.
 
 ## Path safety
 
@@ -312,7 +329,8 @@ For anything you want to keep, duplicate the note into a normal folder
   import the source to trigger a live membership retry.
 - **A source was deleted but still appears as tracked** — absence does not
   revoke explicit source selection. Restore the source to resume automatic
-  imports, or run `md2obs untrack FILE` to stop tracking it.
+  imports, or run `md2obs untrack FILE` to forget it in this vault. Existing
+  vault files are untouched.
 - **`untrack --missing` reports a source as unavailable** — its parent could
   not be read, so md2obs kept it tracked. Restore the mount or permissions and
   retry, or explicitly name the source with `md2obs untrack FILE`.
@@ -351,13 +369,14 @@ tests first (see `internal/materialize/replace.go`).
 
 ## Design
 
-SQLite records operational registry and materialization metadata
+SQLite records disposable operational registry and materialization metadata
 (source → revision → snapshot → materialization), while the original file
 remains the content source of truth. Vault paths are derived, replaceable
 materialization details, and the watcher reacts only to exact registered source
-identities. Source enrollment is explicit: import activates automatic tracking,
-untrack deactivates it, and filesystem absence alone changes neither history nor
-tracking intent.
+identities. Source enrollment is explicit: a materialization associates its
+source with one vault, untrack deletes that vault's associations and collects
+bookkeeping no other vault references, and filesystem absence alone does not
+change tracking intent. Untrack never touches physical vault files.
 
 The physical replacement occurs inside the SQLite transaction, so a failed
 physical write rolls back database changes. SQLite and the filesystem cannot

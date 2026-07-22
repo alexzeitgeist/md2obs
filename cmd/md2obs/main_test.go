@@ -206,7 +206,7 @@ func TestRunUntrackHelp(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("untrack help = %d, stderr = %q", code, stderr)
 	}
-	for _, want := range []string{"md2obs untrack", "--missing", "--older-than", "--dry-run", "reactivates"} {
+	for _, want := range []string{"md2obs untrack", "--missing", "--older-than", "--dry-run", "registers"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}
@@ -299,8 +299,12 @@ func TestRunUntrackCommandUpdatesListState(t *testing.T) {
 		t.Fatalf("untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 	code, stdout, stderr = captureRun(t, []string{"list"})
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "tracking:      inactive") {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "No sources tracked in configured vault") {
 		t.Fatalf("list after untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	code, stdout, stderr = captureRun(t, []string{"untrack", source})
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "not tracked: "+source) {
+		t.Fatalf("repeated untrack = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 }
 

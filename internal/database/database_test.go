@@ -25,7 +25,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("first open: %v", err)
 	}
 	v, err := db.SchemaVersion(ctx)
-	if err != nil || v != 3 {
+	if err != nil || v != 4 {
 		t.Fatalf("schema version = %d, err %v", v, err)
 	}
 	db.Close()
@@ -35,12 +35,106 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer db.Close()
-	if v, err = db.SchemaVersion(ctx); err != nil || v != 3 {
+	if v, err = db.SchemaVersion(ctx); err != nil || v != 4 {
 		t.Fatalf("schema version after reopen = %d, err %v", v, err)
 	}
 }
 
-func TestMigrationReactivatesOnlyLegacyImplicitUntracking(t *testing.T) {
+func TestMigrationForgetsInactivePairsWithoutAffectingOtherVaults(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := db.Query()
+	vaultA, _ := EnsureVault(ctx, q, "/vault-a", "a", "/vault-a", "t")
+	vaultB, _ := EnsureVault(ctx, q, "/vault-b", "b", "/vault-b", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
+
+	shared, _ := UpsertSource(ctx, q, "/src/shared.md", "/src/shared.md", "t")
+	sharedRevision, _ := FindOrCreateRevision(ctx, q, shared, "shared", 1, 1, "t")
+	sharedSnapshot, _ := CreateSnapshot(ctx, q, shared, sharedRevision, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, sharedSnapshot, vaultA, layoutID, "_External/a/shared.md", sharedRevision, "t")
+	CreateMaterialization(ctx, q, sharedSnapshot, vaultB, layoutID, "_External/b/shared.md", sharedRevision, "t")
+
+	aOnly, _ := UpsertSource(ctx, q, "/src/a-only.md", "/src/a-only.md", "t")
+	aOnlyRevision, _ := FindOrCreateRevision(ctx, q, aOnly, "a-only", 1, 1, "t")
+	aOnlySnapshot, _ := CreateSnapshot(ctx, q, aOnly, aOnlyRevision, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, aOnlySnapshot, vaultA, layoutID, "_External/a/only.md", aOnlyRevision, "t")
+
+	activeA, _ := UpsertSource(ctx, q, "/src/active-a.md", "/src/active-a.md", "t")
+	activeRevision, _ := FindOrCreateRevision(ctx, q, activeA, "active", 1, 1, "t")
+	activeSnapshot, _ := CreateSnapshot(ctx, q, activeA, activeRevision, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, activeSnapshot, vaultA, layoutID, "_External/a/active.md", activeRevision, "t")
+
+	if _, err := q.ExecContext(ctx, `CREATE TABLE watch_tracking (
+		source_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+		vault_id INTEGER NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+		active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+		updated_at_utc TEXT NOT NULL,
+		PRIMARY KEY (source_id, vault_id)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		sourceID int64
+		vaultID  int64
+		active   int
+	}{
+		{shared, vaultA, 0},
+		{shared, vaultB, 1},
+		{aOnly, vaultA, 0},
+		{activeA, vaultA, 1},
+	} {
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO watch_tracking (source_id, vault_id, active, updated_at_utc) VALUES (?, ?, ?, 't')`,
+			row.sourceID, row.vaultID, row.active,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE metadata SET value = '3' WHERE key = ?`, schemaVersionKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	q = db.Query()
+	if version, err := db.SchemaVersion(ctx); err != nil || version != 4 {
+		t.Fatalf("schema version = %d, err %v", version, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, shared, vaultA); err != nil || tracked {
+		t.Fatalf("shared source remained in vault A: tracked %v, err %v", tracked, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, shared, vaultB); err != nil || !tracked {
+		t.Fatalf("shared source was removed from vault B: tracked %v, err %v", tracked, err)
+	}
+	if source, err := GetSourceByPath(ctx, q, "/src/shared.md"); err != nil || source == nil {
+		t.Fatalf("shared source bookkeeping = %+v, err %v", source, err)
+	}
+	if source, err := GetSourceByPath(ctx, q, "/src/a-only.md"); err != nil || source != nil {
+		t.Fatalf("vault-A-only source survived = %+v, err %v", source, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, activeA, vaultA); err != nil || !tracked {
+		t.Fatalf("active vault-A source was removed: tracked %v, err %v", tracked, err)
+	}
+	var trackingTable int
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'watch_tracking'`,
+	).Scan(&trackingTable); err != nil || trackingTable != 0 {
+		t.Fatalf("watch_tracking table count = %d, err %v", trackingTable, err)
+	}
+	assertDatabaseIntegrity(t, q)
+}
+
+func TestMigrationFromSchema2RetainsImplicitlyInactiveMaterialization(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := Open(ctx, path)
@@ -49,8 +143,24 @@ func TestMigrationReactivatesOnlyLegacyImplicitUntracking(t *testing.T) {
 	}
 	q := db.Query()
 	vaultID, _ := EnsureVault(ctx, q, "/vault", "vault", "/vault", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
 	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/src/note.md", "t")
-	if err := SetWatchActive(ctx, q, sourceID, vaultID, false, "legacy"); err != nil {
+	revisionID, _ := FindOrCreateRevision(ctx, q, sourceID, "sha", 1, 1, "t")
+	snapshotID, _ := CreateSnapshot(ctx, q, sourceID, revisionID, "2026-07-20", "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultID, layoutID, "_External/note.md", revisionID, "t")
+	if _, err := q.ExecContext(ctx, `CREATE TABLE watch_tracking (
+		source_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+		vault_id INTEGER NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+		active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+		updated_at_utc TEXT NOT NULL,
+		PRIMARY KEY (source_id, vault_id)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ExecContext(ctx,
+		`INSERT INTO watch_tracking (source_id, vault_id, active, updated_at_utc) VALUES (?, ?, 0, 't')`,
+		sourceID, vaultID,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := q.ExecContext(ctx, `UPDATE metadata SET value = '2' WHERE key = ?`, schemaVersionKey); err != nil {
@@ -64,26 +174,11 @@ func TestMigrationReactivatesOnlyLegacyImplicitUntracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := IsWatchActive(ctx, db.Query(), sourceID, vaultID)
-	if err != nil || !active {
-		t.Fatalf("legacy inactive row was not reactivated: active %v, err %v", active, err)
-	}
-	if err := SetWatchActive(ctx, db.Query(), sourceID, vaultID, false, "explicit"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err = Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer db.Close()
-	active, err = IsWatchActive(ctx, db.Query(), sourceID, vaultID)
-	if err != nil || active {
-		t.Fatalf("schema-v3 explicit inactive row did not persist: active %v, err %v", active, err)
+	if tracked, err := IsSourceTrackedInVault(ctx, db.Query(), sourceID, vaultID); err != nil || !tracked {
+		t.Fatalf("schema-v2 implicit inactive materialization was forgotten: tracked %v, err %v", tracked, err)
 	}
+	assertDatabaseIntegrity(t, db.Query())
 }
 
 func TestSourceUniqueness(t *testing.T) {
@@ -309,17 +404,11 @@ func TestSelectWatchCandidatesAreVaultScoped(t *testing.T) {
 	if id, err := GetVaultIDByKey(ctx, q, "/never-registered"); err != nil || id != 0 {
 		t.Errorf("watch candidate query registered vault: id %d, err %v", id, err)
 	}
-	if err := SetWatchActive(ctx, q, recent, vaultA, false, "later"); err != nil {
+	if _, err := ForgetSourceInVault(ctx, q, recent, "/src/recent.md", vaultA); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := SelectWatchCandidates(ctx, q, "/vault-a", "2026-07-19", "2026-07-20"); err != nil || len(got) != 0 {
-		t.Fatalf("inactive candidate = %+v, err %v", got, err)
-	}
-	if err := SetWatchActive(ctx, q, recent, vaultA, true, "latest"); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := SelectWatchCandidates(ctx, q, "/vault-a", "2026-07-19", "2026-07-20"); err != nil || len(got) != 1 {
-		t.Fatalf("reactivated candidate = %+v, err %v", got, err)
+		t.Fatalf("forgotten candidate = %+v, err %v", got, err)
 	}
 }
 
@@ -367,21 +456,15 @@ func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T
 	if got[1].CanonicalPath != "/src/recent.md" || got[1].SnapshotDate != "2026-07-20" || got[1].ContentSHA != "sha-20" {
 		t.Errorf("recent candidate = %+v", got[1])
 	}
-	if err := SetWatchActive(ctx, q, recent, vaultA, false, "later"); err != nil {
+	if _, err := ForgetSourceInVault(ctx, q, recent, "/src/recent.md", vaultA); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := SelectAllWatchCandidates(ctx, q, "/vault-a"); err != nil || len(got) != 1 || got[0].CanonicalPath != "/src/older.md" {
-		t.Fatalf("inactive all-candidate = %+v, err %v", got, err)
-	}
-	if err := SetWatchActive(ctx, q, recent, vaultA, true, "latest"); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := SelectAllWatchCandidates(ctx, q, "/vault-a"); err != nil || len(got) != 2 {
-		t.Fatalf("reactivated all-candidates = %+v, err %v", got, err)
+		t.Fatalf("forgotten all-candidate = %+v, err %v", got, err)
 	}
 }
 
-func TestTrackingEntriesAndListStateAreVaultScoped(t *testing.T) {
+func TestTrackingEntriesAndListAreVaultScoped(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	q := db.Query()
@@ -396,33 +479,149 @@ func TestTrackingEntriesAndListStateAreVaultScoped(t *testing.T) {
 	CreateMaterialization(ctx, q, snapshotID, vaultB, layoutID, "_External/b.md", revisionID, "t")
 
 	entries, err := ListTrackingEntries(ctx, q, "/vault-a")
-	if err != nil || len(entries) != 1 || !entries[0].Active || entries[0].SnapshotDate != "2026-07-20" {
-		t.Fatalf("default tracking entries = %+v, err %v", entries, err)
-	}
-	if err := SetWatchActive(ctx, q, sourceID, vaultA, false, "later"); err != nil {
-		t.Fatal(err)
-	}
-	if active, err := IsWatchActive(ctx, q, sourceID, vaultA); err != nil || active {
-		t.Fatalf("vault-a active = %v, err %v", active, err)
-	}
-	if active, err := IsWatchActive(ctx, q, sourceID, vaultB); err != nil || !active {
-		t.Fatalf("default vault-b active = %v, err %v", active, err)
+	if err != nil || len(entries) != 1 || entries[0].SnapshotDate != "2026-07-20" {
+		t.Fatalf("vault-A tracking entries = %+v, err %v", entries, err)
 	}
 	entries, err = FindTrackingEntriesByPath(ctx, q, "/vault-a", "/unmatched", "/display/note.md")
-	if err != nil || len(entries) != 1 || entries[0].Active {
-		t.Fatalf("inactive display-path lookup = %+v, err %v", entries, err)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("display-path lookup = %+v, err %v", entries, err)
+	}
+
+	preview, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview != (ForgetResult{MaterializationsDeleted: 1}) {
+		t.Fatalf("preview = %+v", preview)
+	}
+	forgotten, err := ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil || forgotten != preview {
+		t.Fatalf("forgotten = %+v, preview %+v, err %v", forgotten, preview, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, sourceID, vaultA); err != nil || tracked {
+		t.Fatalf("vault-A tracked = %v, err %v", tracked, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, sourceID, vaultB); err != nil || !tracked {
+		t.Fatalf("vault-B tracked = %v, err %v", tracked, err)
+	}
+	entries, err = ListTrackingEntries(ctx, q, "/vault-a")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("forgotten vault-A entries = %+v, err %v", entries, err)
 	}
 	entries, err = ListTrackingEntries(ctx, q, "/vault-b")
-	if err != nil || len(entries) != 1 || !entries[0].Active {
-		t.Fatalf("vault-b tracking changed with vault-a = %+v, err %v", entries, err)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("vault-B tracking changed with vault-A forget = %+v, err %v", entries, err)
 	}
 
 	listed, err := ListSources(ctx, q, vaultA)
-	if err != nil || len(listed) != 1 || !listed[0].TrackingActive.Valid || listed[0].TrackingActive.Bool {
-		t.Fatalf("listed inactive tracking = %+v, err %v", listed, err)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("listed forgotten vault-A source = %+v, err %v", listed, err)
 	}
-	listed, err = ListSources(ctx, q, 0)
-	if err != nil || len(listed) != 1 || listed[0].TrackingActive.Valid {
-		t.Fatalf("listed unmaterialized tracking = %+v, err %v", listed, err)
+	listed, err = ListSources(ctx, q, vaultB)
+	if err != nil || len(listed) != 1 || listed[0].RelativePath != "_External/b.md" {
+		t.Fatalf("listed vault-B source = %+v, err %v", listed, err)
+	}
+	assertDatabaseIntegrity(t, q)
+}
+
+func TestForgetSourceInVaultUsesPredicatesAndReportsExactGC(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	q := db.Query()
+	vaultA, _ := EnsureVault(ctx, q, "/vault-a", "a", "/vault-a", "t")
+	vaultB, _ := EnsureVault(ctx, q, "/vault-b", "b", "/vault-b", "t")
+	layoutID, _ := EnsureLayout(ctx, q, "dated-flat-v1", 1, "{}", "t")
+	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/src/note.md", "t")
+	r1, _ := FindOrCreateRevision(ctx, q, sourceID, "r1", 1, 1, "t")
+	r2, _ := FindOrCreateRevision(ctx, q, sourceID, "r2", 1, 2, "t")
+	r3, _ := FindOrCreateRevision(ctx, q, sourceID, "r3", 1, 3, "t")
+	s1, _ := CreateSnapshot(ctx, q, sourceID, r1, "2026-07-19", "t")
+	s2, _ := CreateSnapshot(ctx, q, sourceID, r2, "2026-07-20", "t")
+	s3, _ := CreateSnapshot(ctx, q, sourceID, r3, "2026-07-21", "t")
+	CreateMaterialization(ctx, q, s1, vaultA, layoutID, "_External/a/19.md", r1, "t")
+	CreateMaterialization(ctx, q, s1, vaultB, layoutID, "_External/b/19.md", r1, "t")
+	CreateMaterialization(ctx, q, s2, vaultA, layoutID, "_External/a/20.md", r2, "t")
+	CreateMaterialization(ctx, q, s3, vaultB, layoutID, "_External/b/21.md", r3, "t")
+
+	preview, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (ForgetResult{MaterializationsDeleted: 2, SnapshotsDeleted: 1, RevisionsDeleted: 1}); preview != want {
+		t.Fatalf("vault-A preview = %+v, want %+v", preview, want)
+	}
+
+	// Simulate an import committed after untrack selection/dry-run but before
+	// its write transaction. Predicate deletion must include this new row.
+	r4, _ := FindOrCreateRevision(ctx, q, sourceID, "r4", 1, 4, "t")
+	s4, _ := CreateSnapshot(ctx, q, sourceID, r4, "2026-07-22", "t")
+	CreateMaterialization(ctx, q, s4, vaultA, layoutID, "_External/a/22.md", r4, "t")
+
+	forgotten, err := ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (ForgetResult{MaterializationsDeleted: 3, SnapshotsDeleted: 2, RevisionsDeleted: 2}); forgotten != want {
+		t.Fatalf("vault-A forgotten = %+v, want %+v", forgotten, want)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, sourceID, vaultA); err != nil || tracked {
+		t.Fatalf("vault-A tracked = %v, err %v", tracked, err)
+	}
+	if tracked, err := IsSourceTrackedInVault(ctx, q, sourceID, vaultB); err != nil || !tracked {
+		t.Fatalf("vault-B tracked = %v, err %v", tracked, err)
+	}
+	assertDatabaseIntegrity(t, q)
+
+	preview, err = PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (ForgetResult{MaterializationsDeleted: 2, SnapshotsDeleted: 2, RevisionsDeleted: 2, SourceDeleted: true}); preview != want {
+		t.Fatalf("vault-B preview = %+v, want %+v", preview, want)
+	}
+	forgotten, err = ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultB)
+	if err != nil || forgotten != preview {
+		t.Fatalf("vault-B forgotten = %+v, preview %+v, err %v", forgotten, preview, err)
+	}
+	assertDatabaseIntegrity(t, q)
+	if sources, snapshots, materializations, err := db.Counts(ctx); err != nil || sources != 0 || snapshots != 0 || materializations != 0 {
+		t.Fatalf("counts = %d sources/%d snapshots/%d materializations, err %v", sources, snapshots, materializations, err)
+	}
+}
+
+func assertDatabaseIntegrity(t *testing.T, q Querier) {
+	t.Helper()
+	rows, err := q.QueryContext(context.Background(), `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table string
+		var rowID int64
+		var parent string
+		var fkID int
+		if err := rows.Scan(&table, &rowID, &parent, &fkID); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("foreign-key violation: table %s row %d parent %s fk %d", table, rowID, parent, fkID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	var orphanSnapshots, orphanRevisions int
+	if err := q.QueryRowContext(context.Background(), `
+		SELECT
+		    (SELECT COUNT(*) FROM snapshots AS sn
+		     WHERE NOT EXISTS (SELECT 1 FROM materializations AS m WHERE m.snapshot_id = sn.snapshot_id)),
+		    (SELECT COUNT(*) FROM revisions AS r
+		     WHERE NOT EXISTS (SELECT 1 FROM snapshots AS sn WHERE sn.revision_id = r.revision_id)
+		       AND NOT EXISTS (SELECT 1 FROM materializations AS m WHERE m.written_revision_id = r.revision_id))`,
+	).Scan(&orphanSnapshots, &orphanRevisions); err != nil {
+		t.Fatal(err)
+	}
+	if orphanSnapshots != 0 || orphanRevisions != 0 {
+		t.Fatalf("post-GC orphans = %d snapshots/%d revisions", orphanSnapshots, orphanRevisions)
 	}
 }
