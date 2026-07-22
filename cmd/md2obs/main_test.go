@@ -136,6 +136,28 @@ func TestRunReportsUsageBeforeLoadingConfig(t *testing.T) {
 	}
 }
 
+func TestRunVersionBeforeLoadingConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MD2OBS_VAULT", "")
+	t.Setenv("MD2OBS_STATE_DB", "")
+
+	oldVersion, oldCommit := version, commit
+	version, commit = "0.1.0", "e2ff809a1234567890"
+	t.Cleanup(func() {
+		version, commit = oldVersion, oldCommit
+	})
+
+	code, stdout, stderr := captureRun(t, []string{"version"})
+	if code != 0 || stdout != "md2obs 0.1.0 (e2ff809)\n" || stderr != "" {
+		t.Fatalf("version = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = captureRun(t, []string{"version", "extra"})
+	if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: md2obs version") {
+		t.Fatalf("version extra = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
 func TestRunRemovedWatchCommandsReportUsageBeforeLoadingConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MD2OBS_VAULT", "")

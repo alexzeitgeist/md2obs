@@ -42,6 +42,7 @@ The watcher re-imports the file each time it changes; stop it with Ctrl-C.
 | `md2obs refresh` | Check tracked sources once and import changes. |
 | `md2obs watch` | Keep re-importing tracked sources until stopped. |
 | `md2obs untrack` | Stop tracking sources. Vault copies stay. |
+| `md2obs version` | Report the installed version and source commit. |
 | `md2obs debug` | Inspect configuration and state. |
 
 Run `md2obs COMMAND --help` for options.

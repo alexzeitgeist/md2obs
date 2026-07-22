@@ -31,6 +31,7 @@ Usage:
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs untrack FILE...
   md2obs untrack [--missing] [--older-than AGE] [--dry-run]
+  md2obs version
   md2obs debug COMMAND
 
 Commands:
@@ -38,6 +39,7 @@ Commands:
   refresh  Check tracked sources once and copy changes.
   watch    Watch tracked sources and copy changes until stopped.
   untrack  Stop tracking sources without deleting vault files.
+  version  Print the installed version and source commit.
   debug    Inspect configuration and state.
 
 Run 'md2obs COMMAND --help' for command options.
@@ -47,6 +49,11 @@ Configuration:
   MD2OBS_VAULT     overrides vault_path
   MD2OBS_STATE_DB  overrides the state database path
 `
+
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 var commandUsage = map[string]string{
 	"import": `Usage:
@@ -132,6 +139,17 @@ func run(args []string) int {
 	switch command {
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stdout, usage)
+		return 0
+	case "version":
+		if len(commandArgs) != 0 {
+			fmt.Fprintln(os.Stderr, "md2obs: usage: md2obs version")
+			return 2
+		}
+		displayCommit := commit
+		if len(displayCommit) > 7 {
+			displayCommit = displayCommit[:7]
+		}
+		fmt.Fprintf(os.Stdout, "md2obs %s (%s)\n", version, displayCommit)
 		return 0
 	case "import", "refresh", "watch", "untrack":
 	case "debug":
