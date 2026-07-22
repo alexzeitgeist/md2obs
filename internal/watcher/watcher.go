@@ -12,10 +12,14 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// DefaultRefreshDebounce coalesces bursts of import and untrack membership
-// notifications. It is independent of the source quiet period exposed by
-// --debounce.
-const DefaultRefreshDebounce = 50 * time.Millisecond
+const (
+	// DefaultRefreshDebounce coalesces bursts of import and untrack membership
+	// notifications. It is independent of the source quiet period exposed by
+	// --debounce.
+	DefaultRefreshDebounce = 50 * time.Millisecond
+	parentRetryInitial     = 100 * time.Millisecond
+	parentRetryAttempts    = 6
+)
 
 // Stats describes the exact sources and source directories armed at startup.
 type Stats struct {
@@ -25,7 +29,7 @@ type Stats struct {
 
 // Options configures one dynamically reconciled watch session. All callbacks,
 // index mutations, and watched imports run serially on the event-loop
-// goroutine. Timer goroutines only deliver paths on channels.
+// goroutine. Timers only signal the event-loop goroutine through channels.
 type Options struct {
 	NotificationPath string
 	SourceDebounce   time.Duration
@@ -71,35 +75,55 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	}
 
 	ix := NewIndex(nil)
+	type parentRecovery struct {
+		warned bool
+	}
+	recoveringParents := make(map[string]parentRecovery)
 
-	reconcile := func(paths []string, activate bool, remove func(string)) {
+	reconcile := func(paths []string, activate bool, remove func(string)) bool {
 		// Re-add every candidate parent once per refresh. Native watches are
 		// discarded when a directory is deleted; refreshing the watch before the
 		// membership check heals a directory that was later recreated.
 		desired := make(map[string]struct{}, len(paths))
+		desiredParents := make(map[string]struct{})
 		parentResults := make(map[string]error)
+		rearmedParents := make(map[string]struct{})
 		for _, path := range paths {
 			clean := filepath.Clean(path)
+			if _, duplicate := desired[clean]; duplicate {
+				continue
+			}
 			desired[clean] = struct{}{}
 			parent := filepath.Dir(clean)
+			desiredParents[parent] = struct{}{}
 			armErr, attempted := parentResults[parent]
 			if !attempted {
+				state, recovering := recoveringParents[parent]
 				armErr = w.Add(parent)
 				parentResults[parent] = armErr
 				if armErr != nil {
-					logger.Warn("cannot watch source directory", "source", clean, "parent", parent, "err", armErr)
+					if !state.warned {
+						logger.Warn("cannot watch source directory; retrying briefly", "source", clean, "parent", parent, "err", armErr)
+						state.warned = true
+					}
+					recoveringParents[parent] = state
+				} else if recovering {
+					delete(recoveringParents, parent)
+					rearmedParents[parent] = struct{}{}
+					if state.warned {
+						logger.Info("restored source directory watch", "parent", parent)
+					}
 				}
 			}
 			if armErr != nil {
 				continue
 			}
-			if _, exists := ix.Match(clean); exists {
+			_, exists := ix.Match(clean)
+			if !exists && !ix.Add(clean) {
 				continue
 			}
-			if !ix.Add(clean) {
-				continue
-			}
-			if activate && opts.Activate != nil {
+			_, rearmed := rearmedParents[parent]
+			if activate && opts.Activate != nil && (!exists || rearmed) {
 				opts.Activate(clean)
 			}
 		}
@@ -111,13 +135,19 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 				removeWatchedSource(w, ix, notificationParent, path, remove, logger)
 			}
 		}
+		for parent := range recoveringParents {
+			if _, keep := desiredParents[parent]; !keep {
+				delete(recoveringParents, parent)
+			}
+		}
+		return len(recoveringParents) > 0
 	}
 
 	initial, err := opts.Load()
 	if err != nil {
 		return err
 	}
-	reconcile(initial, false, nil)
+	needsParentRetry := reconcile(initial, false, nil)
 	if opts.Ready != nil {
 		opts.Ready(Stats{Sources: ix.Len(), Directories: len(ix.Parents())})
 	}
@@ -140,16 +170,56 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 	}
 	defer stopRetry()
 
+	var parentRetryTimer *time.Timer
+	var parentRetryC <-chan time.Time
+	parentRetryAttempt := 0
+	parentRetryExhausted := false
+	stopParentRetry := func() {
+		if parentRetryTimer != nil {
+			parentRetryTimer.Stop()
+		}
+		parentRetryTimer = nil
+		parentRetryC = nil
+		parentRetryAttempt = 0
+		parentRetryExhausted = false
+	}
+	scheduleParentRetry := func() {
+		if parentRetryC != nil {
+			return
+		}
+		delay, retry := sourceParentRetryDelay(parentRetryAttempt)
+		if !retry {
+			if !parentRetryExhausted {
+				logger.Warn(
+					"source directory watches remain unavailable; automatic retries stopped",
+					"parents", len(recoveringParents),
+					"action", "run md2obs import for restored sources or restart the watcher",
+				)
+				parentRetryExhausted = true
+			}
+			return
+		}
+		parentRetryAttempt++
+		parentRetryTimer = time.NewTimer(delay)
+		parentRetryC = parentRetryTimer.C
+	}
+	defer stopParentRetry()
+
 	refresh := func() error {
 		paths, loadErr := opts.Load()
 		if loadErr == nil {
-			reconcile(paths, true, func(path string) {
+			needsRetry := reconcile(paths, true, func(path string) {
 				sourceDebouncer.Cancel(path)
 				if opts.Remove != nil {
 					opts.Remove(path)
 				}
 			})
 			stopRetry()
+			if needsRetry {
+				scheduleParentRetry()
+			} else {
+				stopParentRetry()
+			}
 			return nil
 		}
 
@@ -173,6 +243,9 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 		retryC = retryTimer.C
 		return nil
 	}
+	if needsParentRetry {
+		scheduleParentRetry()
+	}
 
 	for {
 		select {
@@ -182,6 +255,17 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 			}
 			clean := filepath.Clean(ev.Name)
 			if clean == notificationPath && ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
+				if len(recoveringParents) > 0 {
+					stopParentRetry()
+				}
+				refreshDebouncer.Trigger(notificationPath)
+				continue
+			}
+			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && ix.HasParent(clean) {
+				if _, recovering := recoveringParents[clean]; !recovering {
+					stopParentRetry()
+					recoveringParents[clean] = parentRecovery{}
+				}
 				refreshDebouncer.Trigger(notificationPath)
 				continue
 			}
@@ -214,10 +298,23 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) error {
 			if err := refresh(); err != nil {
 				return err
 			}
+		case <-parentRetryC:
+			parentRetryTimer = nil
+			parentRetryC = nil
+			if err := refresh(); err != nil {
+				return err
+			}
 		case <-ctx.Done():
 			return nil
 		}
 	}
+}
+
+func sourceParentRetryDelay(attempt int) (time.Duration, bool) {
+	if attempt < 0 || attempt >= parentRetryAttempts {
+		return 0, false
+	}
+	return parentRetryInitial << attempt, true
 }
 
 type watchRemover interface {

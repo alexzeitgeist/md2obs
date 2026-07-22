@@ -148,6 +148,28 @@ func TestRemoveWatchedSourceReleasesOnlyUnusedSourceParent(t *testing.T) {
 	}
 }
 
+func TestSourceParentRetryDelayIsBounded(t *testing.T) {
+	want := []time.Duration{
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+		1600 * time.Millisecond,
+		3200 * time.Millisecond,
+	}
+	for attempt, wantDelay := range want {
+		delay, retry := sourceParentRetryDelay(attempt)
+		if !retry || delay != wantDelay {
+			t.Fatalf("attempt %d = (%s, %t), want (%s, true)", attempt, delay, retry, wantDelay)
+		}
+	}
+	for _, attempt := range []int{-1, len(want)} {
+		if delay, retry := sourceParentRetryDelay(attempt); retry || delay != 0 {
+			t.Fatalf("attempt %d = (%s, %t), want (0, false)", attempt, delay, retry)
+		}
+	}
+}
+
 func TestDebouncerCoalescesBursts(t *testing.T) {
 	d := NewDebouncer(50 * time.Millisecond)
 	defer d.Stop()
@@ -391,7 +413,7 @@ func TestRunRefreshRemovesUntrackedSourceAndCancelsPendingEvent(t *testing.T) {
 	}
 }
 
-func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
+func TestRunRearmsRecreatedSourceDirectoryWithoutNotification(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state.db")
 	sourceParent := filepath.Join(t.TempDir(), "project")
@@ -399,15 +421,13 @@ func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := filepath.Join(sourceParent, "initial.md")
-	dynamic := filepath.Join(sourceParent, "dynamic.md")
 	if err := os.WriteFile(initial, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	var includeDynamic atomic.Bool
 	ready := make(chan Stats, 1)
-	activated := make(chan string, 1)
-	handled := make(chan string, 4)
+	activated := make(chan string, 2)
+	handledContent := make(chan string, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -415,15 +435,15 @@ func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
 			NotificationPath: NotificationPath(databasePath),
 			SourceDebounce:   10 * time.Millisecond,
 			RefreshDebounce:  10 * time.Millisecond,
-			Load: func() ([]string, error) {
-				if includeDynamic.Load() {
-					return []string{initial, dynamic}, nil
+			Load:             func() ([]string, error) { return []string{initial}, nil },
+			Activate:         func(path string) { activated <- path },
+			Handle: func(path string) {
+				content, err := os.ReadFile(path)
+				if err == nil {
+					handledContent <- string(content)
 				}
-				return []string{initial}, nil
 			},
-			Activate: func(path string) { activated <- path },
-			Handle:   func(path string) { handled <- path },
-			Ready:    func(stats Stats) { ready <- stats },
+			Ready: func(stats Stats) { ready <- stats },
 		}, discardLogger())
 	}()
 	defer cancel()
@@ -436,37 +456,34 @@ func TestRunRefreshRearmsRecreatedSourceDirectory(t *testing.T) {
 	if err := os.RemoveAll(sourceParent); err != nil {
 		t.Fatal(err)
 	}
+	// Leave the desired parent absent long enough for the watch-death refresh
+	// and at least one recovery attempt to fail. No membership notification is
+	// sent before or after recreation.
+	time.Sleep(250 * time.Millisecond)
 	if err := os.Mkdir(sourceParent, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(initial, []byte("two"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dynamic, []byte("new"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	includeDynamic.Store(true)
-	if err := NotifyImport(databasePath); err != nil {
-		t.Fatal(err)
-	}
 	select {
 	case path := <-activated:
-		if path != dynamic {
-			t.Fatalf("activated %q, want %q", path, dynamic)
+		if path != initial {
+			t.Fatalf("activated %q, want %q", path, initial)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("new source in recreated directory was not activated")
+		t.Fatal("source in recreated directory was not activated")
 	}
 
-	// Activation proves the membership refresh completed. A later write to an
-	// already-enrolled path proves that refresh also restored the native watch.
+	// Activation catches content recreated before the watch was restored. A
+	// later write proves that recovery also restored the native watch.
 	if err := os.WriteFile(initial, []byte("three"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case path := <-handled:
-		if path != initial {
-			t.Fatalf("handled %q, want %q", path, initial)
+	case content := <-handledContent:
+		if content != "three" {
+			t.Fatalf("handled content = %q, want %q", content, "three")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("recreated source directory was not re-armed")
@@ -641,16 +658,13 @@ func TestRunRetriesSourceWhoseParentBecomesAvailable(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("available"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := NotifyImport(databasePath); err != nil {
-		t.Fatal(err)
-	}
 	select {
 	case path := <-activated:
 		if path != sourcePath {
 			t.Fatalf("activated %q, want %q", path, sourcePath)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("source was not retried after its parent became available")
+		t.Fatal("source was not retried automatically after its parent became available")
 	}
 	cancel()
 	if err := <-done; err != nil {

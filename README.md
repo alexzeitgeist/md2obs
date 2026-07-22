@@ -145,16 +145,21 @@ for imports. Membership grows with successful imports and is not reduced merely
 because the date window advances; an explicit `untrack` removes a source from
 the live session. A new invocation recalculates the window. The discovery range
 expands across midnight so an import immediately before midnight is not missed
-when its notification arrives just after midnight.
+when its notification arrives just after midnight. If a selected source
+directory disappears, the watcher retries briefly with backoff. If the
+directory returns during that window, md2obs restores the native watch and
+checks the affected sources for changes. After retries stop, import the source
+again or restart the watcher once its directory is available.
 
 Startup is passive and never rewrites existing vault copies. A source enrolled
 after startup gets one silent content check after its directory watch is armed,
 closing the small import-to-watch race; matching content causes no vault write
 and does not evaluate `--on-vault-change`. The watcher never scans directories,
-never imports unrelated files, and does no polling — idle, it consumes
-effectively no CPU. `md2obs watch` stays in the foreground until interrupted;
-stop it with Ctrl-C. Run `md2obs refresh` for an explicit one-shot source
-catch-up before or after a watch session.
+never imports unrelated files, and does no polling while its directory watches
+are healthy or after a recovery window ends — idle, it consumes effectively no
+CPU. `md2obs watch` stays in the foreground until interrupted; stop it with
+Ctrl-C. Run `md2obs refresh` for an explicit one-shot source catch-up before or
+after a watch session.
 
 Only one watcher may run for each resolved `(state database, vault)` pair on
 Linux and macOS. A second invocation exits with an error. The operating system
