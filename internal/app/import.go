@@ -117,8 +117,9 @@ type sourceFacts struct {
 func importFile(ctx context.Context, d *Deps, file string, policy Policy, registered *database.Source, facts *sourceFacts) (Result, error) {
 	var canonical, display string
 	if registered != nil {
-		// facts != nil means reconcileWatchCandidate already verified the
-		// registered identity for this operation.
+		// facts != nil means reconcileWatchCandidate verified the registered
+		// identity again after reading the content it supplies here, binding
+		// those bytes to a still-valid registration.
 		if facts == nil {
 			if err := source.VerifyRegisteredIdentity(registered.CanonicalPath); err != nil {
 				return Result{}, err
@@ -209,25 +210,28 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
 	var mat *database.Materialization
-	var matDestAbs string
 	if snap != nil {
 		mat, err = database.GetMaterialization(ctx, tx, snap.ID, vaultID)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 	}
-	if mat != nil {
-		matDestAbs, err = safepath.WithinRoot(vaultRoot, mat.RelativePath)
-		if err != nil {
-			return Result{}, fmt.Errorf("import %s: %w", display, err)
-		}
-	}
+
+	// WithinRoot validates current filesystem state only, so its result is
+	// never carried across other filesystem or database operations: every
+	// physical vault read and write below re-verifies containment immediately
+	// before the operation, or an ancestor symlink retargeted in between could
+	// redirect it outside the vault.
 
 	// Unchanged: the database and the physical vault copy must all contain the
 	// same revision. Merely finding the destination is insufficient because an
 	// Obsidian edit may have changed its content since md2obs last wrote it.
 	if snap != nil && snap.RevisionID == revID && mat != nil && mat.WrittenRevisionID == revID {
-		current, readErr := os.ReadFile(matDestAbs)
+		destAbs, err := safepath.WithinRoot(vaultRoot, mat.RelativePath)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		current, readErr := os.ReadFile(destAbs)
 		if readErr == nil && source.HashBytes(current) == sha {
 			if err := tx.Commit(); err != nil {
 				return Result{}, fmt.Errorf("import %s: commit: %w", display, err)
@@ -245,7 +249,11 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// compare the current vault content with the revision last written. A
 	// mismatch means someone edited the vault copy since the last import.
 	if mat != nil && policy != PolicyOverwrite {
-		current, readErr := os.ReadFile(matDestAbs)
+		destAbs, err := safepath.WithinRoot(vaultRoot, mat.RelativePath)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		current, readErr := os.ReadFile(destAbs)
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return Result{}, fmt.Errorf("import %s: read vault copy: %w", display, readErr)
 		}
@@ -306,7 +314,11 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// Materialize: reuse the reserved path, or reserve the first free
 	// layout candidate.
 	if mat != nil {
-		if err := materialize.WriteAtomic(matDestAbs, content, 0o644); err != nil {
+		destAbs, err := safepath.WithinRoot(vaultRoot, mat.RelativePath)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		if err := materialize.WriteAtomic(destAbs, content, 0o644); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 		if err := database.UpdateMaterializationWritten(ctx, tx, mat.ID, revID, nowUTC); err != nil {
@@ -314,7 +326,11 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		}
 		res.RelPath = mat.RelativePath
 	} else {
-		relPath, destAbs, err := reserveCandidate(ctx, d, tx, vaultID, now, canonical)
+		relPath, err := reserveCandidate(ctx, d, tx, vaultID, now, canonical)
+		if err != nil {
+			return Result{}, fmt.Errorf("import %s: %w", display, err)
+		}
+		destAbs, err := safepath.WithinRoot(vaultRoot, relPath)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
@@ -339,12 +355,12 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 }
 
 // reserveCandidate walks the layout's ordered candidates and picks the first
-// vault-relative path not owned by another materialization, returning it with
-// its containment-checked absolute destination. An existing path unknown to
-// the database is preserved by allocating a numbered sibling. Candidates that
-// fail the containment check are skipped rather than fatal because a later
-// candidate may still be valid.
-func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, now time.Time, canonical string) (string, string, error) {
+// vault-relative path not owned by another materialization. An existing path
+// unknown to the database is preserved by allocating a numbered sibling.
+// Candidates that fail the containment check are skipped rather than fatal
+// because a later candidate may still be valid. The caller re-verifies
+// containment when it joins the returned path for the physical write.
+func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, now time.Time, canonical string) (string, error) {
 	input := layout.CandidateInput{
 		SnapshotDate:  now,
 		SourcePath:    canonical,
@@ -354,14 +370,14 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 	}
 	candidates, err := d.Layout.CandidatePaths(input)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	var containmentErr error
 	for _, rel := range candidates {
-		owned, occupied, destAbs, containErr, err := probeCandidate(ctx, d, q, vaultID, rel)
+		owned, occupied, containErr, err := probeCandidate(ctx, d, q, vaultID, rel)
 		switch {
 		case err != nil:
-			return "", "", err
+			return "", err
 		case owned:
 			continue
 		case occupied:
@@ -370,30 +386,30 @@ func reserveCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID 
 			containmentErr = containErr
 			continue
 		}
-		return rel, destAbs, nil
+		return rel, nil
 	}
 	if containmentErr != nil {
-		return "", "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
+		return "", fmt.Errorf("no safe destination for %s: %w", canonical, containmentErr)
 	}
-	return "", "", fmt.Errorf("no available destination filename for %s", canonical)
+	return "", fmt.Errorf("no available destination filename for %s", canonical)
 }
 
-func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (string, string, error) {
+func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (string, error) {
 	for n := 1; ; n++ {
 		candidate, err := layout.NumberedSibling(rel, n)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
-		owned, occupied, destAbs, containErr, err := probeCandidate(ctx, d, q, vaultID, candidate)
+		owned, occupied, containErr, err := probeCandidate(ctx, d, q, vaultID, candidate)
 		switch {
 		case err != nil:
-			return "", "", err
+			return "", err
 		case owned, occupied:
 			continue
 		case containErr != nil:
-			return "", "", containErr
+			return "", containErr
 		}
-		return candidate, destAbs, nil
+		return candidate, nil
 	}
 }
 
@@ -402,20 +418,19 @@ func reserveNumberedCandidate(ctx context.Context, d *Deps, q database.Querier, 
 // probed on the lexical path without following symlinks so an unowned symlink
 // counts as occupied and is preserved rather than resolved; containment is
 // verified only for a candidate that would actually be written.
-func probeCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (owned, occupied bool, destAbs string, containErr, err error) {
+func probeCandidate(ctx context.Context, d *Deps, q database.Querier, vaultID int64, rel string) (owned, occupied bool, containErr, err error) {
 	owned, err = database.IsPathOwned(ctx, q, vaultID, rel)
 	if err != nil || owned {
-		return owned, false, "", nil, err
+		return owned, false, nil, err
 	}
 	occupied, err = destinationOccupied(filepath.Join(d.Config.VaultAbs, filepath.FromSlash(rel)))
 	if err != nil || occupied {
-		return false, occupied, "", nil, err
+		return false, occupied, nil, err
 	}
-	destAbs, containErr = safepath.WithinRoot(d.Config.VaultAbs, rel)
-	if containErr != nil {
-		return false, false, "", containErr, nil
+	if _, containErr = safepath.WithinRoot(d.Config.VaultAbs, rel); containErr != nil {
+		return false, false, containErr, nil
 	}
-	return false, false, destAbs, nil, nil
+	return false, false, nil, nil
 }
 
 func destinationOccupied(destAbs string) (bool, error) {

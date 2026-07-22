@@ -31,14 +31,8 @@ func reconcileWatchCandidate(
 	candidate database.WatchCandidate,
 	policy Policy,
 ) (candidateReconcileResult, error) {
-	if err := source.VerifyRegisteredIdentity(candidate.CanonicalPath); err != nil {
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			return candidateReconcileResult{Missing: true}, nil
-		case errors.Is(err, source.ErrSourceIdentityChanged):
-			return candidateReconcileResult{}, err
-		}
-		return candidateReconcileResult{}, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
+	if missing, err := verifyCandidateIdentity(candidate); missing || err != nil {
+		return candidateReconcileResult{Missing: missing}, err
 	}
 	info, err := source.Inspect(candidate.CanonicalPath)
 	if err != nil {
@@ -58,6 +52,14 @@ func reconcileWatchCandidate(
 		return candidateReconcileResult{}, nil
 	}
 
+	// The bytes just read are committed under the registered identity, and
+	// importFile skips its own verification when facts are supplied, so verify
+	// again here: a retarget that persisted through the read is rejected
+	// instead of imported under the original registration.
+	if missing, err := verifyCandidateIdentity(candidate); missing || err != nil {
+		return candidateReconcileResult{Missing: missing}, err
+	}
+
 	facts := &sourceFacts{info: info, content: content, sha: sha}
 	res, err := importFile(ctx, d, candidate.CanonicalPath, policy, &candidate.Source, facts)
 	if errors.Is(err, errSourceUntracked) {
@@ -67,4 +69,20 @@ func reconcileWatchCandidate(
 		return candidateReconcileResult{}, err
 	}
 	return candidateReconcileResult{Import: &res}, nil
+}
+
+// verifyCandidateIdentity classifies a registered-identity check for the
+// reconcile flow: a vanished path is a missing source, not a failure, and an
+// identity change keeps its own error unwrapped.
+func verifyCandidateIdentity(candidate database.WatchCandidate) (missing bool, err error) {
+	if err := source.VerifyRegisteredIdentity(candidate.CanonicalPath); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return true, nil
+		case errors.Is(err, source.ErrSourceIdentityChanged):
+			return false, err
+		}
+		return false, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
+	}
+	return false, nil
 }
