@@ -129,6 +129,62 @@ func TestValidateRejectsDanglingDatabaseSymlinkIntoVault(t *testing.T) {
 	}
 }
 
+func TestValidateCanonicalizesDatabasePathAliases(t *testing.T) {
+	base := t.TempDir()
+	vault := filepath.Join(base, "vault")
+	stateDir := filepath.Join(base, "state")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existingDB := filepath.Join(stateDir, "existing.db")
+	if err := os.WriteFile(existingDB, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileAlias := filepath.Join(base, "database-link.db")
+	if err := os.Symlink(existingDB, fileAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	directoryAlias := filepath.Join(base, "state-link")
+	if err := os.Symlink(stateDir, directoryAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resolvedExisting, err := filepath.EvalSymlinks(existingDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "existing file symlink", path: fileAlias, want: resolvedExisting},
+		{name: "missing file below directory symlink", path: filepath.Join(directoryAlias, "future.db"), want: filepath.Join(resolvedStateDir, "future.db")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				VaultPath:     vault,
+				Layout:        DefaultLayout,
+				RootDirectory: DefaultRootDirectory,
+				StateDBPath:   tc.path,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.StateDBPath != tc.want {
+				t.Fatalf("StateDBPath = %q, want canonical identity %q", cfg.StateDBPath, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadFromFileAndEnv(t *testing.T) {
 	confHome := t.TempDir()
 	vault := t.TempDir()
@@ -157,8 +213,12 @@ func TestLoadFromFileAndEnv(t *testing.T) {
 	if cfg.RootDirectory != "Imports" {
 		t.Errorf("RootDirectory = %q", cfg.RootDirectory)
 	}
-	if cfg.StateDBPath != filepath.Join(dbDir, "state.db") {
-		t.Errorf("StateDBPath = %q", cfg.StateDBPath)
+	resolvedDBDir, err := filepath.EvalSymlinks(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolvedDBDir, "state.db"); cfg.StateDBPath != want {
+		t.Errorf("StateDBPath = %q, want %q", cfg.StateDBPath, want)
 	}
 
 	// MD2OBS_VAULT overrides the file.

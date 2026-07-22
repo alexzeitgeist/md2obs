@@ -205,6 +205,7 @@ func (c *Config) Validate() error {
 	if dbInside {
 		return fmt.Errorf("state database %s must live outside the vault %s", dbAbs, c.VaultAbs)
 	}
+	c.StateDBPath = dbResolved
 	return nil
 }
 

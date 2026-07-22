@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"md2obs/internal/config"
+	"md2obs/internal/watcher"
 )
 
 const (
@@ -109,6 +110,55 @@ func TestWatchLockScopesDatabaseAndVault(t *testing.T) {
 	}
 	for _, release := range releases {
 		release()
+	}
+}
+
+func TestWatchIdentityUsesCanonicalDatabasePath(t *testing.T) {
+	root := t.TempDir()
+	vault := filepath.Join(root, "vault")
+	stateDir := filepath.Join(root, "state")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateAlias := filepath.Join(root, "state-link")
+	if err := os.Symlink(stateDir, stateAlias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	newConfig := func(statePath string) *config.Config {
+		return &config.Config{
+			VaultPath:     vault,
+			Layout:        config.DefaultLayout,
+			RootDirectory: config.DefaultRootDirectory,
+			StateDBPath:   statePath,
+		}
+	}
+	realConfig := newConfig(filepath.Join(stateDir, "state.db"))
+	aliasConfig := newConfig(filepath.Join(stateAlias, "state.db"))
+	for _, cfg := range []*config.Config{realConfig, aliasConfig} {
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if realConfig.StateDBPath != aliasConfig.StateDBPath {
+		t.Fatalf("database identities differ: %q != %q", realConfig.StateDBPath, aliasConfig.StateDBPath)
+	}
+	if watchLockPath(realConfig) != watchLockPath(aliasConfig) {
+		t.Fatalf("lock paths differ: %q != %q", watchLockPath(realConfig), watchLockPath(aliasConfig))
+	}
+	if watcher.NotificationPath(realConfig.StateDBPath) != watcher.NotificationPath(aliasConfig.StateDBPath) {
+		t.Fatal("notification paths differ for the same physical database")
+	}
+
+	release, err := acquireWatchLock(realConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := acquireWatchLock(aliasConfig); !errors.Is(err, errWatchAlreadyRunning) {
+		t.Fatalf("aliased database lock error = %v, want %v", err, errWatchAlreadyRunning)
 	}
 }
 
