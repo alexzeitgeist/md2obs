@@ -20,6 +20,9 @@ type RefreshOptions struct {
 	// OnVaultChange decides what happens when a changed source would overwrite
 	// a vault copy edited since the last import.
 	OnVaultChange Policy
+	// Rerender bypasses the passive source-hash gate for selected candidates so
+	// the central import path can apply the current renderer profile.
+	Rerender bool
 }
 
 // Validate checks refresh settings without touching config, SQLite, or the
@@ -66,7 +69,7 @@ func RunRefresh(ctx context.Context, d *Deps, opts RefreshOptions) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange)
+		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange, opts.Rerender)
 		if err != nil {
 			fmt.Fprintf(d.Err, "error: refresh: %v\n", err)
 			failed++

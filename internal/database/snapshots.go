@@ -8,20 +8,22 @@ import (
 )
 
 // Snapshot selects one revision of one source for one calendar date.
+// CreatedAtUTC is stable for the lifetime of the dated snapshot.
 type Snapshot struct {
-	ID         int64
-	SourceID   int64
-	RevisionID int64
-	Date       string
+	ID           int64
+	SourceID     int64
+	RevisionID   int64
+	Date         string
+	CreatedAtUTC string
 }
 
 // GetSnapshot returns nil when the source has no snapshot for the date.
 func GetSnapshot(ctx context.Context, q Querier, sourceID int64, date string) (*Snapshot, error) {
 	s := Snapshot{SourceID: sourceID, Date: date}
 	err := q.QueryRowContext(ctx, `
-		SELECT snapshot_id, revision_id FROM snapshots
+		SELECT snapshot_id, revision_id, created_at_utc FROM snapshots
 		WHERE source_id = ? AND snapshot_date = ?`,
-		sourceID, date).Scan(&s.ID, &s.RevisionID)
+		sourceID, date).Scan(&s.ID, &s.RevisionID, &s.CreatedAtUTC)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

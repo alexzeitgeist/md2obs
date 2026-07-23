@@ -26,6 +26,11 @@ func RunStatus(ctx context.Context, d *Deps) error {
 	fmt.Fprintf(d.Out, "Vault:             %s\n", d.Config.VaultAbs)
 	fmt.Fprintf(d.Out, "Layout:            %s (version %d)\n", d.Layout.Name(), d.Layout.Version())
 	fmt.Fprintf(d.Out, "Destination root:  %s\n", d.Config.RootDirectory)
+	provenance := "disabled"
+	if d.Config.ProvenanceFrontmatter {
+		provenance = "enabled"
+	}
+	fmt.Fprintf(d.Out, "Provenance:        %s\n", provenance)
 	fmt.Fprintf(d.Out, "Schema version:    %d\n", version)
 	fmt.Fprintf(d.Out, "Sources:           %d\n", sources)
 	fmt.Fprintf(d.Out, "Snapshots:         %d\n", snapshots)

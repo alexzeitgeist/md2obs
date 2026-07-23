@@ -30,6 +30,7 @@ func reconcileWatchCandidate(
 	d *Deps,
 	candidate database.WatchCandidate,
 	policy Policy,
+	rerender bool,
 ) (candidateReconcileResult, error) {
 	if missing, err := verifyCandidateIdentity(candidate); missing || err != nil {
 		return candidateReconcileResult{Missing: missing}, err
@@ -48,7 +49,7 @@ func reconcileWatchCandidate(
 		}
 		return candidateReconcileResult{}, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
 	}
-	if sha == candidate.ContentSHA {
+	if !rerender && sha == candidate.ContentSHA {
 		return candidateReconcileResult{}, nil
 	}
 

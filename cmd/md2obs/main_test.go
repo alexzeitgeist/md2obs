@@ -22,6 +22,9 @@ func TestParseCommand(t *testing.T) {
 		{"import missing file", "import", nil, "usage: md2obs import FILE"},
 		{"refresh", "refresh", nil, ""},
 		{"refresh all", "refresh", []string{"--all", "--on-vault-change=preserve"}, ""},
+		{"refresh rerender default window", "refresh", []string{"--rerender"}, ""},
+		{"refresh rerender days", "refresh", []string{"--days=7", "--rerender"}, ""},
+		{"refresh rerender all", "refresh", []string{"--all", "--rerender"}, ""},
 		{"refresh positional", "refresh", []string{"extra"}, "usage: md2obs refresh"},
 		{"refresh all and days", "refresh", []string{"--all", "--days=2"}, "--all cannot be combined"},
 		{"refresh invalid days", "refresh", []string{"--days=0"}, "--days must be at least 1"},
@@ -68,11 +71,11 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestParseRefreshOptions(t *testing.T) {
-	got, err := parseCommand("refresh", []string{"--all", "--on-vault-change=preserve"})
+	got, err := parseCommand("refresh", []string{"--all", "--rerender", "--on-vault-change=preserve"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := app.RefreshOptions{Days: 1, All: true, OnVaultChange: app.PolicyPreserve}
+	want := app.RefreshOptions{Days: 1, All: true, Rerender: true, OnVaultChange: app.PolicyPreserve}
 	if got.refresh != want {
 		t.Fatalf("refresh options = %+v, want %+v", got.refresh, want)
 	}
@@ -268,7 +271,7 @@ func TestRunRefreshHelp(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("refresh help = %d, stderr = %q", code, stderr)
 	}
-	for _, want := range []string{"md2obs refresh", "--days", "--all", "--on-vault-change"} {
+	for _, want := range []string{"md2obs refresh", "--days", "--all", "--rerender", "--on-vault-change"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not contain %q:\n%s", want, stdout)
 		}

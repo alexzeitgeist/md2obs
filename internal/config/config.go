@@ -22,6 +22,9 @@ type Config struct {
 	Layout string `json:"layout"`
 	// RootDirectory is the vault-relative destination root, e.g. "_External".
 	RootDirectory string `json:"root_directory"`
+	// ProvenanceFrontmatter adds managed source-path and import-time properties
+	// to rendered vault copies. It is deliberately opt-in.
+	ProvenanceFrontmatter bool `json:"provenance_frontmatter"`
 
 	// VaultAbs is VaultPath made absolute with symlinks resolved. It is the
 	// stable vault identity (vault_key) and the base for all vault writes.

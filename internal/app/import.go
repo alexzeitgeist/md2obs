@@ -16,6 +16,7 @@ import (
 	"github.com/alexzeitgeist/md2obs/internal/database"
 	"github.com/alexzeitgeist/md2obs/internal/layout"
 	"github.com/alexzeitgeist/md2obs/internal/materialize"
+	"github.com/alexzeitgeist/md2obs/internal/render"
 	"github.com/alexzeitgeist/md2obs/internal/safepath"
 	"github.com/alexzeitgeist/md2obs/internal/source"
 )
@@ -146,7 +147,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		}
 		facts = &sourceFacts{info: info, content: content, sha: sha}
 	}
-	info, content, sha := facts.info, facts.content, facts.sha
+	info, sourceContent, sourceSHA := facts.info, facts.content, facts.sha
 
 	now := d.Now()
 	date := now.Format(dateFormat)
@@ -189,7 +190,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 	}
-	revID, err := database.FindOrCreateRevision(ctx, tx, srcID, sha, info.ByteSize, info.MtimeNS, nowUTC)
+	revID, err := database.FindOrCreateRevision(ctx, tx, srcID, sourceSHA, info.ByteSize, info.MtimeNS, nowUTC)
 	if err != nil {
 		return Result{}, fmt.Errorf("import %s: %w", display, err)
 	}
@@ -216,6 +217,20 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 	}
+	snapshotTime := nowUTC
+	if snap != nil {
+		snapshotTime = snap.CreatedAtUTC
+	}
+	rendered, err := render.Render(render.Input{
+		SourceContent:  sourceContent,
+		CanonicalPath:  canonical,
+		SnapshotTime:   snapshotTime,
+		WithProvenance: d.Config.ProvenanceFrontmatter,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("import %s: render: %w", display, err)
+	}
+	desiredSHA := rendered.SHA256
 
 	// WithinRoot validates current filesystem state only, so its result is
 	// never carried across other filesystem or database operations: every
@@ -223,16 +238,24 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	// before the operation, or an ancestor symlink retargeted in between could
 	// redirect it outside the vault.
 
-	// Unchanged: the database and the physical vault copy must all contain the
-	// same revision. Merely finding the destination is insufficient because an
-	// Obsidian edit may have changed its content since md2obs last wrote it.
-	if snap != nil && snap.RevisionID == revID && mat != nil && mat.WrittenRevisionID == revID {
+	// Unchanged: source intent, the last recorded write, desired rendered
+	// bytes, and the physical vault copy must all converge exactly.
+	if snap != nil &&
+		snap.RevisionID == revID &&
+		mat != nil &&
+		mat.WrittenRevisionID == revID &&
+		mat.WrittenContentSHA256 == desiredSHA {
 		destAbs, err := safepath.WithinRoot(vaultRoot, mat.RelativePath)
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 		current, readErr := os.ReadFile(destAbs)
-		if readErr == nil && source.HashBytes(current) == sha {
+		if readErr == nil && source.HashBytes(current) == desiredSHA {
+			if mat.WrittenRenderProfile != rendered.Profile {
+				if err := database.UpdateMaterializationRenderProfile(ctx, tx, mat.ID, rendered.Profile); err != nil {
+					return Result{}, fmt.Errorf("import %s: %w", display, err)
+				}
+			}
 			if err := tx.Commit(); err != nil {
 				return Result{}, fmt.Errorf("import %s: commit: %w", display, err)
 			}
@@ -246,8 +269,8 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 	}
 
 	// Vault-change policy: before overwriting an existing materialization,
-	// compare the current vault content with the revision last written. A
-	// mismatch means someone edited the vault copy since the last import.
+	// compare the live bytes with both the exact bytes last recorded and the
+	// newly desired output.
 	if mat != nil && policy != PolicyOverwrite {
 		destAbs, err := safepath.WithinRoot(vaultRoot, mat.RelativePath)
 		if err != nil {
@@ -259,11 +282,7 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		}
 		if readErr == nil {
 			currentSHA := source.HashBytes(current)
-			writtenSHA, err := database.RevisionSHA(ctx, tx, mat.WrittenRevisionID)
-			if err != nil {
-				return Result{}, fmt.Errorf("import %s: %w", display, err)
-			}
-			if currentSHA != writtenSHA && currentSHA != sha {
+			if currentSHA != mat.WrittenContentSHA256 && currentSHA != desiredSHA {
 				switch policy {
 				case PolicySkip:
 					// Record the observed revision as today's intent but do
@@ -318,10 +337,18 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
-		if err := materialize.WriteAtomic(destAbs, content, 0o644); err != nil {
+		if err := materialize.WriteAtomic(destAbs, rendered.Content, 0o644); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
-		if err := database.UpdateMaterializationWritten(ctx, tx, mat.ID, revID, nowUTC); err != nil {
+		if err := database.UpdateMaterializationWritten(
+			ctx,
+			tx,
+			mat.ID,
+			revID,
+			desiredSHA,
+			rendered.Profile,
+			nowUTC,
+		); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 		res.RelPath = mat.RelativePath
@@ -334,10 +361,21 @@ func importFile(ctx context.Context, d *Deps, file string, policy Policy, regist
 		if err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
-		if err := materialize.WriteAtomic(destAbs, content, 0o644); err != nil {
+		if err := materialize.WriteAtomic(destAbs, rendered.Content, 0o644); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
-		if _, err := database.CreateMaterialization(ctx, tx, snapID, vaultID, layoutID, relPath, revID, nowUTC); err != nil {
+		if _, err := database.CreateMaterialization(
+			ctx,
+			tx,
+			snapID,
+			vaultID,
+			layoutID,
+			relPath,
+			revID,
+			desiredSHA,
+			rendered.Profile,
+			nowUTC,
+		); err != nil {
 			return Result{}, fmt.Errorf("import %s: %w", display, err)
 		}
 		res.RelPath = relPath

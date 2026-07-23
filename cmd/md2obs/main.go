@@ -27,7 +27,7 @@ const usage = `Copy selected Markdown files into dated folders in an Obsidian va
 Usage:
   md2obs FILE...
   md2obs import FILE...
-  md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
+  md2obs refresh [--days N | --all] [--rerender] [--on-vault-change=POLICY]
   md2obs watch [--days N] [--debounce DURATION] [--on-vault-change=POLICY]
   md2obs untrack FILE...
   md2obs untrack [--missing] [--older-than AGE] [--dry-run]
@@ -64,13 +64,14 @@ Copy each FILE into today's dated folder. Running the command again updates
 today's copy. Explicit imports replace edits made to the managed vault copy.
 `,
 	"refresh": `Usage:
-  md2obs refresh [--days N | --all] [--on-vault-change=POLICY]
+  md2obs refresh [--days N | --all] [--rerender] [--on-vault-change=POLICY]
 
 Check tracked sources once and copy any changes.
 
 Options:
   --days N                    Sources imported in the last N days (default 1)
   --all                       All sources tracked in this vault
+  --rerender                  Apply the current rendering configuration
   --on-vault-change POLICY    skip (default), preserve, or overwrite
 `,
 	"watch": `Usage:
@@ -274,12 +275,13 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 		fs := commandFlagSet("refresh")
 		days := fs.Int("days", 1, "sources imported in the last N days (1 = today)")
 		allSources := fs.Bool("all", false, "all sources tracked in this vault")
+		rerender := fs.Bool("rerender", false, "apply the current rendering configuration")
 		policyFlag := fs.String("on-vault-change", string(app.PolicySkip), "edited vault copy: skip, preserve, or overwrite")
 		if err := fs.Parse(args); err != nil {
 			return options, err
 		}
 		if fs.NArg() != 0 {
-			return options, fmt.Errorf("usage: md2obs refresh [--days N | --all] [--on-vault-change=POLICY]")
+			return options, fmt.Errorf("usage: md2obs refresh [--days N | --all] [--rerender] [--on-vault-change=POLICY]")
 		}
 		daysSet := false
 		fs.Visit(func(f *flag.Flag) {
@@ -295,6 +297,7 @@ func parseCommand(command string, args []string) (commandOptions, error) {
 			Days:          *days,
 			DaysSet:       daysSet,
 			All:           *allSources,
+			Rerender:      *rerender,
 			OnVaultChange: policy,
 		}
 		if err := options.refresh.Validate(); err != nil {

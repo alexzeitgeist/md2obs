@@ -100,23 +100,24 @@ func FindSourcesByPath(ctx context.Context, q Querier, path string) ([]Source, e
 
 // ListEntry is one row of `md2obs debug list`: a source with its latest snapshot.
 type ListEntry struct {
-	DisplayPath  string
-	SnapshotDate string
-	RelativePath string
-	// Current compares database intent with the last recorded write; it does
-	// not describe a live filesystem check.
-	Current bool
+	DisplayPath      string
+	SnapshotDate     string
+	RelativePath     string
+	SourceCurrent    bool
+	RenderingCurrent bool
 }
 
 // ListSources returns each source currently tracked in the given vault with
-// its newest materialized snapshot there.
-func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, error) {
+// its newest materialized snapshot there. Both state flags are database facts;
+// this function performs no live filesystem checks.
+func ListSources(ctx context.Context, q Querier, vaultID int64, desiredProfile string) ([]ListEntry, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT
 		    s.display_path,
 		    sn.snapshot_date,
 		    m.relative_path,
-		    m.written_revision_id = sn.revision_id
+		    m.written_revision_id = sn.revision_id,
+		    m.written_render_profile = ?
 		FROM materializations AS m
 		JOIN snapshots AS sn ON sn.snapshot_id = m.snapshot_id
 		JOIN sources AS s ON s.source_id = sn.source_id
@@ -127,7 +128,7 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 		      JOIN materializations AS m2 ON m2.snapshot_id = sn2.snapshot_id
 		      WHERE sn2.source_id = s.source_id
 		        AND m2.vault_id = m.vault_id)
-		ORDER BY s.display_path`, vaultID)
+		ORDER BY s.display_path`, desiredProfile, vaultID)
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
@@ -136,7 +137,13 @@ func ListSources(ctx context.Context, q Querier, vaultID int64) ([]ListEntry, er
 	var entries []ListEntry
 	for rows.Next() {
 		var e ListEntry
-		if err := rows.Scan(&e.DisplayPath, &e.SnapshotDate, &e.RelativePath, &e.Current); err != nil {
+		if err := rows.Scan(
+			&e.DisplayPath,
+			&e.SnapshotDate,
+			&e.RelativePath,
+			&e.SourceCurrent,
+			&e.RenderingCurrent,
+		); err != nil {
 			return nil, fmt.Errorf("scan list row: %w", err)
 		}
 		entries = append(entries, e)

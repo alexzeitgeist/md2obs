@@ -62,9 +62,38 @@ An import reports one of three results:
 On a later day, the next import creates a new dated copy. An explicit import
 always restores the source content, even if today's vault copy was edited.
 
+Unless provenance properties are enabled (see below), the copy is
+byte-for-byte identical to the source, down to line endings, byte-order
+marks, and the final newline.
+
 If two sources share a name, the later one gets parent directories in its
 name: `README--project-b.md`. A vault file md2obs does not own is never
 overwritten; the import picks a numbered name such as `README-1.md` instead.
+
+## Provenance properties
+
+Set `provenance_frontmatter` to `true` and every copy records where it came
+from and when it was imported:
+
+```yaml
+---
+md2obs_source_path: "/home/alice/projects/project-b/README.md"
+md2obs_imported_at: 2026-07-22T22:30:00Z
+---
+# Project B
+```
+
+Both properties show up in Obsidian's standard
+[Properties UI](https://obsidian.md/help/properties). The note itself is
+copied unchanged, and existing frontmatter is kept: the properties are merged
+into it, possibly with slightly normalized formatting. A leading `---` that
+is not valid frontmatter (a horizontal rule, say) stays part of the note,
+with the properties block placed above it.
+
+`md2obs_imported_at` is the UTC time today's copy was first created; a
+same-day update keeps it. `md2obs_source_path` is the full path on your
+computer, which usually includes your username and goes wherever the vault
+syncs. Keep that in mind if the vault is shared.
 
 ## Watch
 
@@ -100,6 +129,9 @@ sets how long a change must settle before the copy is made (default 500ms).
 md2obs refresh
 md2obs refresh --days 3
 md2obs refresh --all
+md2obs refresh --rerender
+md2obs refresh --days 7 --rerender
+md2obs refresh --all --rerender
 ```
 
 `refresh` is the one-shot version of `watch`: it checks tracked sources once,
@@ -111,6 +143,32 @@ from the source file's modification time. If you do not know how long the
 watcher was off, use `--all`.
 
 Missing sources are counted in the summary but stay tracked.
+
+Turning `provenance_frontmatter` on or off changes nothing by itself:
+`refresh` and `watch` leave unchanged sources alone. An explicit import
+always applies the current setting to that file. To apply it to tracked
+sources, run `refresh --rerender`; it follows the same `--days`/`--all`
+selection as a normal refresh, so you can start with a few recent sources
+before running it with `--all`.
+
+`--rerender` writes into today's folder like any other import. A source whose
+newest copy is from an earlier day gets a fresh copy today; older dated
+copies are never rewritten. Expect `--all --rerender` to create a new copy
+for every tracked source whose newest copy is older than today.
+
+Copies you edited in the vault are kept as they are (`refresh` defaults to
+`--on-vault-change=skip`) and keep showing `rendering: stale` in
+`md2obs debug list`. To update them too, save the edits aside first:
+
+```console
+md2obs refresh --all --rerender --on-vault-change=preserve
+```
+
+or replace them, if that is what you want:
+
+```console
+md2obs refresh --all --rerender --on-vault-change=overwrite
+```
 
 ## Edited vault copies
 
@@ -160,6 +218,17 @@ Batch selectors (a source must match all of them):
 
 Debug commands read the state database; they do not import files.
 
+For each tracked source, `debug list` shows two states:
+
+- `source content` is `stale` when md2obs saw a source change that never made
+  it into the vault copy, for example after a skipped conflict.
+- `rendering` is `stale` when the copy has not yet been written with the
+  current `provenance_frontmatter` setting. `refresh --rerender` clears it,
+  sometimes without rewriting anything when the result would be identical.
+
+Both states come from the state database alone; nothing is read from disk. An
+edit synced in from your phone does not show up here.
+
 ## Configuration
 
 md2obs reads `~/.config/md2obs/config.json` on Linux and
@@ -170,6 +239,7 @@ md2obs reads `~/.config/md2obs/config.json` on Linux and
 | `vault_path` | Existing Obsidian vault directory. Required. |
 | `layout` | Destination layout. Only `dated-flat-v1` exists; it is the default. |
 | `root_directory` | Destination folder inside the vault. Defaults to `_External`. |
+| `provenance_frontmatter` | Record source path and import time in each copy. Defaults to `false`. |
 
 `root_directory` is relative to the vault and cannot be the vault root or
 point outside it. No part of it may start with a dot, because Obsidian hides
@@ -180,7 +250,8 @@ Two environment variables override the configuration for scripting:
 database path, by default `~/.local/share/md2obs/state.db` on Linux and
 `~/Library/Application Support/md2obs/state.db` on macOS. A database path
 inside the vault is rejected: Obsidian Sync would pick up the live database
-files.
+files. There is no environment-variable override for
+`provenance_frontmatter`.
 
 ## Troubleshooting
 

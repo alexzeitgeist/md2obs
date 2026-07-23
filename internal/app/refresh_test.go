@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/render"
 	"github.com/alexzeitgeist/md2obs/internal/watcher"
 )
 
@@ -61,6 +62,197 @@ func TestRunRefreshChangedAndUnchanged(t *testing.T) {
 	}
 }
 
+func TestRefreshAppliesProfileChangesOnlyWhenRerenderIsExplicit(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "profile-toggle.md", "# raw\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.deps.Config.ProvenanceFrontmatter = true
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# raw\n" {
+		t.Fatalf("plain refresh applied a config-only change:\n%s", got)
+	}
+	candidates, err := database.SelectAllWatchCandidates(ctx, env.deps.DB.Query(), env.vault)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("candidates = %+v, err %v", candidates, err)
+	}
+	outcome, err := reconcileWatchCandidate(ctx, env.deps, candidates[0], PolicySkip, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Import != nil || outcome.Missing || outcome.Untracked {
+		t.Fatalf("passive watch-style activation outcome = %+v", outcome)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# raw\n" {
+		t.Fatalf("passive activation applied a config-only change:\n%s", got)
+	}
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rendered := env.vaultFile(t, first.RelPath)
+	if !strings.Contains(rendered, "md2obs_source_path:") || !strings.HasSuffix(rendered, "# raw\n") {
+		t.Fatalf("forced rerender did not apply provenance:\n%s", rendered)
+	}
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := env.out.String()
+	if !strings.Contains(output, "updated: "+src) {
+		t.Fatalf("profile-changing rerender was not updated:\n%s", output)
+	}
+	if strings.Count(output, "Checked 1 source:") != 3 {
+		t.Fatalf("expected three one-source refresh passes:\n%s", output)
+	}
+	if !strings.Contains(output, "0 refreshed, 0 conflicts skipped, 1 unchanged") {
+		t.Fatalf("converged rerender was not unchanged:\n%s", output)
+	}
+}
+
+func TestSkippedRerenderLeavesEveryWrittenFactAndPlainRefreshGoesQuiet(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "rerender-conflict.md", "# raw\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, before := materializationForSource(t, env, src, "2026-07-20")
+	if err := os.WriteFile(
+		filepath.Join(env.vault, filepath.FromSlash(first.RelPath)),
+		[]byte("# phone edit\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	env.deps.Config.ProvenanceFrontmatter = true
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# phone edit\n" {
+		t.Fatalf("skipped rerender changed vault edit: %q", got)
+	}
+	_, after := materializationForSource(t, env, src, "2026-07-20")
+	if after.WrittenRevisionID != before.WrittenRevisionID ||
+		after.WrittenContentSHA256 != before.WrittenContentSHA256 ||
+		after.WrittenRenderProfile != before.WrittenRenderProfile ||
+		after.WrittenAtUTC != before.WrittenAtUTC {
+		t.Fatalf("skip changed written metadata:\nbefore %+v\nafter  %+v", before, after)
+	}
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := env.out.String()
+	if strings.Count(output, "skipped: "+src) != 1 {
+		t.Fatalf("ordinary refresh repeated an explicit rerender conflict:\n%s", output)
+	}
+	if !strings.Contains(output, "Checked 1 source: 0 refreshed, 0 conflicts skipped, 1 unchanged") {
+		t.Fatalf("ordinary refresh did not return to the passive source gate:\n%s", output)
+	}
+}
+
+func TestRerenderTreatsLiveDesiredBytesAsConvergedNotEdited(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	raw := []byte("# raw\n")
+	src := writeSource(t, t.TempDir(), "already-desired.md", string(raw))
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := materializationForSource(t, env, src, "2026-07-20")
+	env.deps.Config.ProvenanceFrontmatter = true
+	desired, err := render.Render(render.Input{
+		SourceContent:  raw,
+		CanonicalPath:  src,
+		SnapshotTime:   snap.CreatedAtUTC,
+		WithProvenance: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(env.vault, filepath.FromSlash(first.RelPath)),
+		desired.Content,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(env.out.String(), "skipped: "+src) {
+		t.Fatalf("desired live bytes were treated as an independent edit:\n%s", env.out.String())
+	}
+	if got := env.vaultFile(t, first.RelPath); got != string(desired.Content) {
+		t.Fatalf("desired content changed unexpectedly:\n%s", got)
+	}
+}
+
+func TestAllRerenderCreatesTodayWithoutMutatingHistoricalMaterialization(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "historical-profile.md", "# raw\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, historicalBefore := materializationForSource(t, env, src, "2026-07-20")
+	env.setNow(time.Date(2026, 7, 21, 10, 0, 0, 0, time.Local))
+	env.deps.Config.ProvenanceFrontmatter = true
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(env.out.String(), "Checked 0 sources") {
+		t.Fatalf("default selection unexpectedly included an older source:\n%s", env.out.String())
+	}
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		All: true, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	todaySnap, todayMat := materializationForSource(t, env, src, "2026-07-21")
+	if todaySnap == nil || todayMat.WrittenRenderProfile != render.ProvenanceProfile {
+		t.Fatalf("today's rerender materialization = %+v / %+v", todaySnap, todayMat)
+	}
+	if got := env.vaultFile(t, todayMat.RelativePath); !strings.Contains(got, "md2obs_source_path:") {
+		t.Fatalf("today's materialization was not rerendered:\n%s", got)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# raw\n" {
+		t.Fatalf("historical vault file was rewritten:\n%s", got)
+	}
+	_, historicalAfter := materializationForSource(t, env, src, "2026-07-20")
+	if historicalAfter.WrittenRenderProfile != historicalBefore.WrittenRenderProfile ||
+		historicalAfter.WrittenContentSHA256 != historicalBefore.WrittenContentSHA256 ||
+		historicalAfter.WrittenAtUTC != historicalBefore.WrittenAtUTC {
+		t.Fatalf("historical metadata changed:\nbefore %+v\nafter  %+v", historicalBefore, historicalAfter)
+	}
+}
+
 func TestReconcileWatchCandidateReportsSourceUntrackedAfterSelection(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -83,7 +275,7 @@ func TestReconcileWatchCandidateReportsSourceUntrackedAfterSelection(t *testing.
 		t.Fatal(err)
 	}
 
-	outcome, err := reconcileWatchCandidate(ctx, env.deps, candidates[0], PolicySkip)
+	outcome, err := reconcileWatchCandidate(ctx, env.deps, candidates[0], PolicySkip, false)
 	if err != nil {
 		t.Fatal(err)
 	}

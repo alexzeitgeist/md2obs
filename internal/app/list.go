@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/alexzeitgeist/md2obs/internal/database"
+	"github.com/alexzeitgeist/md2obs/internal/render"
 )
 
 // RunList prints every known source with its most recent snapshot. This is
@@ -14,7 +15,7 @@ func RunList(ctx context.Context, d *Deps) error {
 	if err != nil {
 		return err
 	}
-	entries, err := database.ListSources(ctx, d.DB.Query(), vaultID)
+	entries, err := database.ListSources(ctx, d.DB.Query(), vaultID, render.Profile(d.Config))
 	if err != nil {
 		return err
 	}
@@ -24,13 +25,18 @@ func RunList(ctx context.Context, d *Deps) error {
 	}
 	for _, e := range entries {
 		fmt.Fprintf(d.Out, "%s\n", e.DisplayPath)
-		fmt.Fprintf(d.Out, "  last snapshot: %s\n", e.SnapshotDate)
-		fmt.Fprintf(d.Out, "  vault path:    %s\n", e.RelativePath)
-		content := "current"
-		if !e.Current {
-			content = "stale"
+		fmt.Fprintf(d.Out, "  last snapshot:  %s\n", e.SnapshotDate)
+		fmt.Fprintf(d.Out, "  vault path:     %s\n", e.RelativePath)
+		sourceContent := "current"
+		if !e.SourceCurrent {
+			sourceContent = "stale"
 		}
-		fmt.Fprintf(d.Out, "  content:       %s\n", content)
+		rendering := "current"
+		if !e.RenderingCurrent {
+			rendering = "stale"
+		}
+		fmt.Fprintf(d.Out, "  source content: %s\n", sourceContent)
+		fmt.Fprintf(d.Out, "  rendering:      %s\n", rendering)
 	}
 	return nil
 }

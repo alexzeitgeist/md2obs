@@ -251,6 +251,7 @@ func TestLoadWithoutConfigFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MD2OBS_VAULT", t.TempDir())
 	t.Setenv("MD2OBS_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Setenv("MD2OBS_PROVENANCE_FRONTMATTER", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -261,5 +262,55 @@ func TestLoadWithoutConfigFile(t *testing.T) {
 	}
 	if cfg.ConfigPath != "" {
 		t.Errorf("ConfigPath = %q for missing file", cfg.ConfigPath)
+	}
+	if cfg.ProvenanceFrontmatter {
+		t.Error("environment-only configuration enabled provenance")
+	}
+}
+
+func TestLoadProvenanceFrontmatterModes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field any
+		want  bool
+	}{
+		{name: "omitted", field: nil, want: false},
+		{name: "explicit false", field: false, want: false},
+		{name: "explicit true", field: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			confHome := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", confHome)
+			t.Setenv("HOME", confHome)
+			t.Setenv("MD2OBS_STATE_DB", filepath.Join(t.TempDir(), "state.db"))
+			t.Setenv("MD2OBS_VAULT", "")
+
+			rawConfig := map[string]any{"vault_path": t.TempDir()}
+			if tc.field != nil {
+				rawConfig["provenance_frontmatter"] = tc.field
+			}
+			raw, err := json.Marshal(rawConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath, err := DefaultConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ProvenanceFrontmatter != tc.want {
+				t.Fatalf("ProvenanceFrontmatter = %v, want %v", cfg.ProvenanceFrontmatter, tc.want)
+			}
+		})
 	}
 }

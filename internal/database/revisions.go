@@ -24,14 +24,3 @@ func FindOrCreateRevision(ctx context.Context, q Querier, sourceID int64, sha256
 	}
 	return id, nil
 }
-
-// RevisionSHA returns the content hash recorded for a revision.
-func RevisionSHA(ctx context.Context, q Querier, revisionID int64) (string, error) {
-	var sha string
-	err := q.QueryRowContext(ctx,
-		`SELECT content_sha256 FROM revisions WHERE revision_id = ?`, revisionID).Scan(&sha)
-	if err != nil {
-		return "", fmt.Errorf("get revision %d: %w", revisionID, err)
-	}
-	return sha, nil
-}

@@ -116,7 +116,7 @@ func RunWatch(ctx context.Context, d *Deps, opts WatchOptions) error {
 			d.logger().Error("watch activation has no registered source", "source", p)
 			return
 		}
-		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange)
+		outcome, err := reconcileWatchCandidate(ctx, d, candidate, opts.OnVaultChange, false)
 		if err != nil {
 			d.logger().Error("watch activation import failed", "source", p, "err", err)
 			return

@@ -2,7 +2,10 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +28,7 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("first open: %v", err)
 	}
 	v, err := db.SchemaVersion(ctx)
-	if err != nil || v != 4 {
+	if err != nil || v != 5 {
 		t.Fatalf("schema version = %d, err %v", v, err)
 	}
 	db.Close()
@@ -35,8 +38,172 @@ func TestMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer db.Close()
-	if v, err = db.SchemaVersion(ctx); err != nil || v != 4 {
+	if v, err = db.SchemaVersion(ctx); err != nil || v != 5 {
 		t.Fatalf("schema version after reopen = %d, err %v", v, err)
+	}
+}
+
+func createSchema4Fixture(t *testing.T, path string, danglingWrittenRevision bool) {
+	t.Helper()
+	dsn := "file:" + url.PathEscape(path)
+	sq, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sq.Close()
+	ctx := context.Background()
+	initial, err := migrationsFS.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sq.ExecContext(ctx, string(initial)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sq.ExecContext(ctx, `
+		CREATE TABLE metadata (
+		    key TEXT PRIMARY KEY,
+		    value TEXT NOT NULL
+		);
+		INSERT INTO metadata (key, value) VALUES ('schema_version', '4');
+		INSERT INTO vaults
+		    (vault_id, vault_key, display_name, local_root_path, registered_at_utc)
+		    VALUES (1, '/vault', 'vault', '/vault', '2026-07-20T10:00:00Z');
+		INSERT INTO layouts
+		    (layout_id, layout_name, layout_version, configuration_json, created_at_utc)
+		    VALUES (1, 'dated-flat-v1', 1, '{}', '2026-07-20T10:00:00Z');
+		INSERT INTO sources
+		    (source_id, canonical_path, display_path, first_seen_at_utc, last_seen_at_utc)
+		    VALUES (1, '/source/note.md', '/source/note.md', '2026-07-20T10:00:00Z', '2026-07-20T10:00:00Z');
+		INSERT INTO revisions
+		    (revision_id, source_id, content_sha256, byte_size, source_mtime_ns, observed_at_utc)
+		    VALUES (1, 1, 'raw-sha', 8, 1, '2026-07-20T10:00:00Z');
+		INSERT INTO snapshots
+		    (snapshot_id, source_id, revision_id, snapshot_date, created_at_utc, updated_at_utc)
+		    VALUES (1, 1, 1, '2026-07-20', '2026-07-20T10:00:00Z', '2026-07-20T10:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writtenRevision := int64(1)
+	if danglingWrittenRevision {
+		writtenRevision = 999
+	}
+	if _, err := sq.ExecContext(ctx, `
+		INSERT INTO materializations
+		    (
+		        materialization_id,
+		        snapshot_id,
+		        vault_id,
+		        layout_id,
+		        relative_path,
+		        written_revision_id,
+		        written_at_utc
+		    )
+		VALUES (1, 1, 1, 1, '_External/2026-07-20/note.md', ?, '2026-07-20T10:00:00Z')`,
+		writtenRevision,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigration5BackfillsExactWrittenStateAndConstraints(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	createSchema4Fixture(t, path, false)
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if version, err := db.SchemaVersion(ctx); err != nil || version != 5 {
+		t.Fatalf("schema version = %d, err %v", version, err)
+	}
+	mat, err := GetMaterialization(ctx, db.Query(), 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mat == nil || mat.WrittenContentSHA256 != "raw-sha" || mat.WrittenRenderProfile != "source-v1" {
+		t.Fatalf("backfilled materialization = %+v", mat)
+	}
+
+	rows, err := db.Query().QueryContext(ctx, `PRAGMA table_info(materializations)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == "written_content_sha256" || name == "written_render_profile" {
+			found[name] = true
+			if notNull != 1 {
+				t.Errorf("%s is nullable", name)
+			}
+			if defaultValue.Valid {
+				t.Errorf("%s default = %q, want no default", name, defaultValue.String)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found["written_content_sha256"] || !found["written_render_profile"] {
+		t.Fatalf("new columns found = %+v", found)
+	}
+	var indexCount int
+	if err := db.Query().QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'index' AND name = 'idx_materializations_snapshot'`,
+	).Scan(&indexCount); err != nil || indexCount != 1 {
+		t.Fatalf("materialization index count = %d, err %v", indexCount, err)
+	}
+	assertDatabaseIntegrity(t, db.Query())
+}
+
+func TestMigration5RejectsDanglingWrittenRevisionAndRollsBack(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	createSchema4Fixture(t, path, true)
+
+	db, err := Open(ctx, path)
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("migration accepted a dangling written_revision_id")
+	}
+	if !strings.Contains(err.Error(), "NOT NULL constraint failed") {
+		t.Fatalf("migration error = %v, want failed LEFT JOIN backfill", err)
+	}
+
+	sq, openErr := sql.Open("sqlite", "file:"+url.PathEscape(path))
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer sq.Close()
+	var version string
+	if err := sq.QueryRowContext(ctx,
+		`SELECT value FROM metadata WHERE key = 'schema_version'`,
+	).Scan(&version); err != nil || version != "4" {
+		t.Fatalf("rolled-back schema version = %q, err %v", version, err)
+	}
+	var materializations, replacementTables int
+	if err := sq.QueryRowContext(ctx, `SELECT COUNT(*) FROM materializations`).Scan(&materializations); err != nil {
+		t.Fatal(err)
+	}
+	if err := sq.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'materializations_v5'`,
+	).Scan(&replacementTables); err != nil {
+		t.Fatal(err)
+	}
+	if materializations != 1 || replacementTables != 0 {
+		t.Fatalf("rollback left materializations=%d replacement tables=%d", materializations, replacementTables)
 	}
 }
 
@@ -55,18 +222,18 @@ func TestMigrationForgetsInactivePairsWithoutAffectingOtherVaults(t *testing.T) 
 	shared, _ := UpsertSource(ctx, q, "/src/shared.md", "/src/shared.md", "t")
 	sharedRevision, _ := FindOrCreateRevision(ctx, q, shared, "shared", 1, 1, "t")
 	sharedSnapshot, _ := CreateSnapshot(ctx, q, shared, sharedRevision, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, sharedSnapshot, vaultA, layoutID, "_External/a/shared.md", sharedRevision, "t")
-	CreateMaterialization(ctx, q, sharedSnapshot, vaultB, layoutID, "_External/b/shared.md", sharedRevision, "t")
+	CreateMaterialization(ctx, q, sharedSnapshot, vaultA, layoutID, "_External/a/shared.md", sharedRevision, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, sharedSnapshot, vaultB, layoutID, "_External/b/shared.md", sharedRevision, "written-sha", "source-v1", "t")
 
 	aOnly, _ := UpsertSource(ctx, q, "/src/a-only.md", "/src/a-only.md", "t")
 	aOnlyRevision, _ := FindOrCreateRevision(ctx, q, aOnly, "a-only", 1, 1, "t")
 	aOnlySnapshot, _ := CreateSnapshot(ctx, q, aOnly, aOnlyRevision, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, aOnlySnapshot, vaultA, layoutID, "_External/a/only.md", aOnlyRevision, "t")
+	CreateMaterialization(ctx, q, aOnlySnapshot, vaultA, layoutID, "_External/a/only.md", aOnlyRevision, "written-sha", "source-v1", "t")
 
 	activeA, _ := UpsertSource(ctx, q, "/src/active-a.md", "/src/active-a.md", "t")
 	activeRevision, _ := FindOrCreateRevision(ctx, q, activeA, "active", 1, 1, "t")
 	activeSnapshot, _ := CreateSnapshot(ctx, q, activeA, activeRevision, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, activeSnapshot, vaultA, layoutID, "_External/a/active.md", activeRevision, "t")
+	CreateMaterialization(ctx, q, activeSnapshot, vaultA, layoutID, "_External/a/active.md", activeRevision, "written-sha", "source-v1", "t")
 
 	if _, err := q.ExecContext(ctx, `CREATE TABLE watch_tracking (
 		source_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
@@ -107,7 +274,7 @@ func TestMigrationForgetsInactivePairsWithoutAffectingOtherVaults(t *testing.T) 
 	}
 	defer db.Close()
 	q = db.Query()
-	if version, err := db.SchemaVersion(ctx); err != nil || version != 4 {
+	if version, err := db.SchemaVersion(ctx); err != nil || version != 5 {
 		t.Fatalf("schema version = %d, err %v", version, err)
 	}
 	if tracked, err := IsSourceTrackedInVault(ctx, q, shared, vaultA); err != nil || tracked {
@@ -147,7 +314,7 @@ func TestMigrationFromSchema2RetainsImplicitlyInactiveMaterialization(t *testing
 	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/src/note.md", "t")
 	revisionID, _ := FindOrCreateRevision(ctx, q, sourceID, "sha", 1, 1, "t")
 	snapshotID, _ := CreateSnapshot(ctx, q, sourceID, revisionID, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, snapshotID, vaultID, layoutID, "_External/note.md", revisionID, "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultID, layoutID, "_External/note.md", revisionID, "written-sha", "source-v1", "t")
 	if _, err := q.ExecContext(ctx, `CREATE TABLE watch_tracking (
 		source_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
 		vault_id INTEGER NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
@@ -251,8 +418,11 @@ func TestRevisionUniquenessPerSourceAndHash(t *testing.T) {
 	if r3 == r1 {
 		t.Error("different hash reused a revision")
 	}
-	if sha, err := RevisionSHA(ctx, q, r3); err != nil || sha != "bbb" {
-		t.Errorf("RevisionSHA = %q, err %v", sha, err)
+	var rawSHA string
+	if err := q.QueryRowContext(ctx,
+		`SELECT content_sha256 FROM revisions WHERE revision_id = ?`, r3,
+	).Scan(&rawSHA); err != nil || rawSHA != "bbb" {
+		t.Errorf("raw revision SHA = %q, err %v", rawSHA, err)
 	}
 }
 
@@ -318,13 +488,13 @@ func TestMaterializationPathUniquePerVault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := CreateMaterialization(ctx, q, snap1, vaultID, layoutID, "_External/2026-07-20/x.md", revID, "t"); err != nil {
+	if _, err := CreateMaterialization(ctx, q, snap1, vaultID, layoutID, "_External/2026-07-20/x.md", revID, "written-sha", "source-v1", "t"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CreateMaterialization(ctx, q, snap2, vaultID, layoutID, "_External/2026-07-20/x.md", revID, "t"); err == nil {
+	if _, err := CreateMaterialization(ctx, q, snap2, vaultID, layoutID, "_External/2026-07-20/x.md", revID, "written-sha", "source-v1", "t"); err == nil {
 		t.Error("duplicate relative path in one vault accepted")
 	}
-	if _, err := CreateMaterialization(ctx, q, snap1, vaultID, layoutID, "_External/other.md", revID, "t"); err == nil {
+	if _, err := CreateMaterialization(ctx, q, snap1, vaultID, layoutID, "_External/other.md", revID, "written-sha", "source-v1", "t"); err == nil {
 		t.Error("second materialization for one (snapshot, vault) accepted")
 	}
 
@@ -369,13 +539,13 @@ func TestSelectWatchCandidatesAreVaultScoped(t *testing.T) {
 	r20, _ := FindOrCreateRevision(ctx, q, recent, "sha-20", 1, 2, "t")
 	s19, _ := CreateSnapshot(ctx, q, recent, r19, "2026-07-19", "t")
 	s20, _ := CreateSnapshot(ctx, q, recent, r20, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "t")
-	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "t")
+	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "written-sha", "source-v1", "t")
 
 	foreign, _ := UpsertSource(ctx, q, "/src/foreign.md", "/src/foreign.md", "t")
 	rForeign, _ := FindOrCreateRevision(ctx, q, foreign, "sha-b", 1, 1, "t")
 	sForeign, _ := CreateSnapshot(ctx, q, foreign, rForeign, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/b.md", rForeign, "t")
+	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/b.md", rForeign, "written-sha", "source-v1", "t")
 
 	global, _ := UpsertSource(ctx, q, "/src/global.md", "/src/global.md", "t")
 	rGlobal, _ := FindOrCreateRevision(ctx, q, global, "sha-global", 1, 1, "t")
@@ -426,18 +596,18 @@ func TestSelectAllWatchCandidatesUsesLatestMaterializationPerSource(t *testing.T
 	r20, _ := FindOrCreateRevision(ctx, q, recent, "sha-20", 1, 2, "t")
 	s19, _ := CreateSnapshot(ctx, q, recent, r19, "2026-07-19", "t")
 	s20, _ := CreateSnapshot(ctx, q, recent, r20, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "t")
-	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "t")
+	CreateMaterialization(ctx, q, s19, vaultA, layoutID, "_External/19.md", r19, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, s20, vaultA, layoutID, "_External/20.md", r20, "written-sha", "source-v1", "t")
 
 	older, _ := UpsertSource(ctx, q, "/src/older.md", "/src/older.md", "t")
 	rOld, _ := FindOrCreateRevision(ctx, q, older, "sha-old", 1, 1, "t")
 	sOld, _ := CreateSnapshot(ctx, q, older, rOld, "2025-01-01", "t")
-	CreateMaterialization(ctx, q, sOld, vaultA, layoutID, "_External/old.md", rOld, "t")
+	CreateMaterialization(ctx, q, sOld, vaultA, layoutID, "_External/old.md", rOld, "written-sha", "source-v1", "t")
 
 	foreign, _ := UpsertSource(ctx, q, "/src/foreign.md", "/src/foreign.md", "t")
 	rForeign, _ := FindOrCreateRevision(ctx, q, foreign, "sha-foreign", 1, 1, "t")
 	sForeign, _ := CreateSnapshot(ctx, q, foreign, rForeign, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/foreign.md", rForeign, "t")
+	CreateMaterialization(ctx, q, sForeign, vaultB, layoutID, "_External/foreign.md", rForeign, "written-sha", "source-v1", "t")
 
 	unmaterialized, _ := UpsertSource(ctx, q, "/src/unmaterialized.md", "/src/unmaterialized.md", "t")
 	rUnmaterialized, _ := FindOrCreateRevision(ctx, q, unmaterialized, "sha-none", 1, 1, "t")
@@ -475,8 +645,8 @@ func TestTrackingEntriesAndListAreVaultScoped(t *testing.T) {
 	sourceID, _ := UpsertSource(ctx, q, "/src/note.md", "/display/note.md", "t")
 	revisionID, _ := FindOrCreateRevision(ctx, q, sourceID, "sha", 1, 1, "t")
 	snapshotID, _ := CreateSnapshot(ctx, q, sourceID, revisionID, "2026-07-20", "t")
-	CreateMaterialization(ctx, q, snapshotID, vaultA, layoutID, "_External/a.md", revisionID, "t")
-	CreateMaterialization(ctx, q, snapshotID, vaultB, layoutID, "_External/b.md", revisionID, "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultA, layoutID, "_External/a.md", revisionID, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, snapshotID, vaultB, layoutID, "_External/b.md", revisionID, "written-sha", "source-v1", "t")
 
 	entries, err := ListTrackingEntries(ctx, q, "/vault-a")
 	if err != nil || len(entries) != 1 || entries[0].SnapshotDate != "2026-07-20" {
@@ -510,11 +680,11 @@ func TestTrackingEntriesAndListAreVaultScoped(t *testing.T) {
 		t.Fatalf("vault-B tracking changed with vault-A forget = %+v, err %v", entries, err)
 	}
 
-	listed, err := ListSources(ctx, q, vaultA)
+	listed, err := ListSources(ctx, q, vaultA, "source-v1")
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("listed forgotten vault-A source = %+v, err %v", listed, err)
 	}
-	listed, err = ListSources(ctx, q, vaultB)
+	listed, err = ListSources(ctx, q, vaultB, "source-v1")
 	if err != nil || len(listed) != 1 || listed[0].RelativePath != "_External/b.md" {
 		t.Fatalf("listed vault-B source = %+v, err %v", listed, err)
 	}
@@ -535,10 +705,10 @@ func TestForgetSourceInVaultUsesPredicatesAndReportsExactGC(t *testing.T) {
 	s1, _ := CreateSnapshot(ctx, q, sourceID, r1, "2026-07-19", "t")
 	s2, _ := CreateSnapshot(ctx, q, sourceID, r2, "2026-07-20", "t")
 	s3, _ := CreateSnapshot(ctx, q, sourceID, r3, "2026-07-21", "t")
-	CreateMaterialization(ctx, q, s1, vaultA, layoutID, "_External/a/19.md", r1, "t")
-	CreateMaterialization(ctx, q, s1, vaultB, layoutID, "_External/b/19.md", r1, "t")
-	CreateMaterialization(ctx, q, s2, vaultA, layoutID, "_External/a/20.md", r2, "t")
-	CreateMaterialization(ctx, q, s3, vaultB, layoutID, "_External/b/21.md", r3, "t")
+	CreateMaterialization(ctx, q, s1, vaultA, layoutID, "_External/a/19.md", r1, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, s1, vaultB, layoutID, "_External/b/19.md", r1, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, s2, vaultA, layoutID, "_External/a/20.md", r2, "written-sha", "source-v1", "t")
+	CreateMaterialization(ctx, q, s3, vaultB, layoutID, "_External/b/21.md", r3, "written-sha", "source-v1", "t")
 
 	wouldChange, err := PreviewForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
 	if err != nil || !wouldChange {
@@ -549,7 +719,7 @@ func TestForgetSourceInVaultUsesPredicatesAndReportsExactGC(t *testing.T) {
 	// its write transaction. Predicate deletion must include this new row.
 	r4, _ := FindOrCreateRevision(ctx, q, sourceID, "r4", 1, 4, "t")
 	s4, _ := CreateSnapshot(ctx, q, sourceID, r4, "2026-07-22", "t")
-	CreateMaterialization(ctx, q, s4, vaultA, layoutID, "_External/a/22.md", r4, "t")
+	CreateMaterialization(ctx, q, s4, vaultA, layoutID, "_External/a/22.md", r4, "written-sha", "source-v1", "t")
 
 	forgotten, err := ForgetSourceInVault(ctx, q, sourceID, "/src/note.md", vaultA)
 	if err != nil {
