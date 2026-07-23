@@ -491,7 +491,7 @@ func printResult(w io.Writer, res Result) {
 		fmt.Fprintf(w, "unchanged: %s\n", res.DisplayPath)
 		return
 	case StatusSkipped:
-		fmt.Fprintf(w, "skipped: %s (vault copy edited; kept; resolve with --on-vault-change=preserve|overwrite)\n", res.DisplayPath)
+		fmt.Fprintf(w, "skipped: %s (vault copy edited; kept; rerun with --on-vault-change=preserve|overwrite)\n", res.DisplayPath)
 		fmt.Fprintf(w, "%s-> %s\n", strings.Repeat(" ", len(StatusSkipped)-2), res.RelPath)
 		return
 	}

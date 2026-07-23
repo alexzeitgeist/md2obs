@@ -169,6 +169,68 @@ func TestSkippedRerenderLeavesEveryWrittenFactAndPlainRefreshGoesQuiet(t *testin
 	}
 }
 
+func TestSkippedRerenderStaysPendingUntilRerenderWithExplicitPolicy(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	raw := []byte("# raw\n")
+	src := writeSource(t, t.TempDir(), "rerender-pending.md", string(raw))
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(env.vault, filepath.FromSlash(first.RelPath)),
+		[]byte("# phone edit\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	env.deps.Config.ProvenanceFrontmatter = true
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicySkip,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// With the raw source unchanged there is no pending source change, so a
+	// plain policy refresh stays passive instead of resolving the rerender skip.
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, OnVaultChange: PolicyPreserve,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# phone edit\n" {
+		t.Fatalf("plain preserve refresh touched a rerender skip: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(env.vault, "_External-Conflicts")); !os.IsNotExist(err) {
+		t.Fatalf("plain preserve refresh saved a conflict copy: %v", err)
+	}
+
+	// Repeating the skipped command with an explicit policy resolves it.
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{
+		Days: 1, Rerender: true, OnVaultChange: PolicyPreserve,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	preserved := env.vaultFile(t, "_External-Conflicts/2026-07-20/rerender-pending--vault-edit.md")
+	if preserved != "# phone edit\n" {
+		t.Fatalf("preserved conflict = %q", preserved)
+	}
+	snap, _ := materializationForSource(t, env, src, "2026-07-20")
+	desired, err := render.Render(render.Input{
+		SourceContent:  raw,
+		CanonicalPath:  src,
+		SnapshotTime:   snap.CreatedAtUTC,
+		WithProvenance: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != string(desired.Content) {
+		t.Fatalf("rerender preserve did not apply the desired rendering:\n%s", got)
+	}
+}
+
 func TestRerenderTreatsLiveDesiredBytesAsConvergedNotEdited(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
