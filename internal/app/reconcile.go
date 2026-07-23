@@ -49,7 +49,7 @@ func reconcileWatchCandidate(
 		}
 		return candidateReconcileResult{}, fmt.Errorf("inspect registered source %s: %w", candidate.DisplayPath, err)
 	}
-	if !rerender && sha == candidate.ContentSHA {
+	if !rerender && sha == candidate.ContentSHA && (policy == PolicySkip || candidate.WrittenCurrent) {
 		return candidateReconcileResult{}, nil
 	}
 

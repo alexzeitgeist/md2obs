@@ -155,8 +155,9 @@ func ListSources(ctx context.Context, q Querier, vaultID int64, desiredProfile s
 // with its newest materialized snapshot inside the discovery window.
 type WatchCandidate struct {
 	Source
-	SnapshotDate string
-	ContentSHA   string
+	SnapshotDate   string
+	ContentSHA     string
+	WrittenCurrent bool
 }
 
 // IsSourceTrackedInVault reports whether any materialization still associates
@@ -263,7 +264,8 @@ func selectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 		    s.canonical_path,
 		    s.display_path,
 		    sn.snapshot_date,
-		    r.content_sha256
+		    r.content_sha256,
+		    m.written_revision_id = sn.revision_id
 		FROM sources AS s
 		JOIN snapshots AS sn
 		    ON sn.source_id = s.source_id
@@ -296,6 +298,7 @@ func selectWatchCandidates(ctx context.Context, q Querier, vaultKey, fromDate, t
 			&candidate.DisplayPath,
 			&candidate.SnapshotDate,
 			&candidate.ContentSHA,
+			&candidate.WrittenCurrent,
 		); err != nil {
 			return nil, fmt.Errorf("scan watch candidate: %w", err)
 		}

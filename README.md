@@ -182,6 +182,10 @@ happens with `--on-vault-change`:
 | `preserve` | Save the vault edit under `_External-Conflicts/`, then update the copy. |
 | `overwrite` | Replace the vault edit with the source. |
 
+A skipped conflict is reported once and then stays pending quietly. Running
+`refresh` (or `watch`) with `preserve` or `overwrite` resolves pending
+conflicts as well as new ones.
+
 An explicit `md2obs FILE...` always overwrites its managed copy, and vault
 edits are never copied back to the source file. Treat `_External` as managed
 output: move or copy a note to another vault folder before editing anything

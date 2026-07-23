@@ -210,6 +210,100 @@ func TestRerenderTreatsLiveDesiredBytesAsConvergedNotEdited(t *testing.T) {
 	}
 }
 
+func TestPreservePolicyResolvesConflictLeftBySkip(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "pending-conflict.md", "# original\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(first.RelPath))
+	if err := os.WriteFile(vaultAbs, []byte("# phone edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("# updated source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The conflict is discovered and kept under the default skip policy, and
+	// a second skip refresh stays quiet instead of repeating it.
+	for range 2 {
+		if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicySkip}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Count(env.out.String(), "skipped: "+src); got != 1 {
+		t.Fatalf("skip refreshes reported the pending conflict %d times", got)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# phone edit\n" {
+		t.Fatalf("skip touched the vault edit: %q", got)
+	}
+
+	// An explicit preserve resolves the pending conflict: the edit is saved
+	// under the conflicts folder and the copy converges on the source.
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicyPreserve}); err != nil {
+		t.Fatal(err)
+	}
+	preserved := env.vaultFile(t, "_External-Conflicts/2026-07-20/pending-conflict--vault-edit.md")
+	if preserved != "# phone edit\n" {
+		t.Fatalf("preserved conflict = %q", preserved)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# updated source\n" {
+		t.Fatalf("preserve did not converge the vault copy: %q", got)
+	}
+
+	// Resolving consumed the conflict: another preserve run is passive.
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicyPreserve}); err != nil {
+		t.Fatal(err)
+	}
+	output := env.out.String()
+	if got := strings.Count(output, "1 refreshed, 0 conflicts skipped, 0 unchanged"); got != 1 {
+		t.Fatalf("preserve resolved the conflict %d times:\n%s", got, output)
+	}
+	if got := strings.Count(output, "0 refreshed, 0 conflicts skipped, 1 unchanged"); got != 2 {
+		t.Fatalf("expected the quiet skip run and the post-resolution run to be passive:\n%s", output)
+	}
+}
+
+func TestOverwritePolicyResolvesConflictLeftBySkip(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	src := writeSource(t, t.TempDir(), "overwrite-pending.md", "# original\n")
+	first, err := ImportFile(ctx, env.deps, src, PolicyOverwrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultAbs := filepath.Join(env.vault, filepath.FromSlash(first.RelPath))
+	if err := os.WriteFile(vaultAbs, []byte("# phone edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("# updated source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicySkip}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicyOverwrite}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.vaultFile(t, first.RelPath); got != "# updated source\n" {
+		t.Fatalf("overwrite did not converge the vault copy: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(env.vault, "_External-Conflicts")); !os.IsNotExist(err) {
+		t.Fatalf("overwrite saved a conflict copy: %v", err)
+	}
+
+	if err := RunRefresh(ctx, env.deps, RefreshOptions{Days: 1, OnVaultChange: PolicyOverwrite}); err != nil {
+		t.Fatal(err)
+	}
+	output := env.out.String()
+	if got := strings.Count(output, "0 refreshed, 0 conflicts skipped, 1 unchanged"); got != 1 {
+		t.Fatalf("resolved conflict was not passive on the next overwrite refresh:\n%s", output)
+	}
+}
+
 func TestAllRerenderCreatesTodayWithoutMutatingHistoricalMaterialization(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
